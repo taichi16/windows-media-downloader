@@ -84,6 +84,10 @@
 
 MMOV 的完整 66 分鐘與 20 分鐘效能閘門仍為 `not-evaluated`。adapter preflight 不等同於 yt-dlp/FFmpeg 後續連線的完整網路 sandbox，redirect/DNS rebinding 仍列為殘餘 TOCTOU 風險。
 
+### 來源 `510813/4-1` 的條件式失敗
+
+2026-09-07 重新檢查使用者回報的來源時，MMOV HTML 頁面可匿名取得並解析出 allowlist 內的 HLS URL，但媒體端點 `bfikuncdn.com` 對固定應用程式 User-Agent、一般瀏覽器 User-Agent、Referer 與 Origin 組合均回傳 nginx `403 Forbidden`。因此此來源在當時環境不可下載；程式維持 fail closed，不嘗試 Cookie、登入、代理、地區規避或存取控制繞過。錯誤訊息已改為顯示實際拒絕請求的 HTTPS host，避免誤判為來源頁面本身被拒絕。
+
 ## 既有平台回歸 probe
 
 另以一個公開、19 秒的 YouTube ID 分別經 `www.youtube.com` 與 `music.youtube.com` 執行相同的不下載 probe；兩者結束碼皆為 0、extractor=`youtube`、availability=`public`。沒有下載該內容。因 portable 尚未攜帶 yt-dlp EJS 與受信任 JavaScript runtime，這只驗證基本路徑，不能宣稱所有 YouTube 格式完整可用。

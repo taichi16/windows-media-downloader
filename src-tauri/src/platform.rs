@@ -126,6 +126,7 @@ fn build_client() -> Result<Client, AppError> {
 }
 
 async fn bounded_get(client: &Client, url: &Url, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+    let host = url.host_str().unwrap_or("未知主機");
     let endpoint = endpoint_for_url(url)?;
     let response = client
         .get(url.clone())
@@ -135,7 +136,7 @@ async fn bounded_get(client: &Client, url: &Url, max_bytes: usize) -> Result<Vec
     validate_response_peer(&response, &endpoint)?;
     if !response.status().is_success() {
         return Err(AppError::Security(format!(
-            "平台回應不是 2xx：{}",
+            "HTTPS 端點 {host} 回應不是 2xx：{}",
             response.status()
         )));
     }
@@ -1206,8 +1207,8 @@ mod tests {
             };
             let target = resolve_target(&request).await.unwrap_or_else(|error| {
                 panic!(
-                    "{variable} live adapter 解析失敗（{}）",
-                    live_error_summary(&error)
+                    "{variable} live adapter 解析失敗（{}）：{error}",
+                    live_error_summary(&error),
                 )
             });
             assert!(

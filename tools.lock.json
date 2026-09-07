@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "target": "windows-x86_64",
+  "verifiedOn": "2026-09-07",
+  "ytDlp": {
+    "version": "2026.08.19",
+    "repository": "https://github.com/yt-dlp/yt-dlp",
+    "release": "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19",
+    "releaseImmutable": true,
+    "asset": {
+      "name": "yt-dlp.exe",
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
+      "size": 17840399,
+      "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+    },
+    "checksumFile": {
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/SHA2-256SUMS",
+      "size": 1595,
+      "sha256": "a63701f30755cb4d9317950d69703e9d751d490cb1b7059e1bb501a353fe7dcb"
+    },
+    "checksumSignature": {
+      "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/SHA2-256SUMS.sig",
+      "size": 566,
+      "sha256": "8d6f9a7c84c57222e3650c61699185878a3468308de702993ce4f20b5f9cf199"
+    },
+    "signingKey": {
+      "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.08.19/public.key",
+      "size": 1676,
+      "sha256": "45d6b415928b5f3e228b461fa9e6d7eb56a824931c785ece00279a06c7a6d6e5",
+      "fingerprint": "AC0CBBE6848D6A873464AF4E57CF65933B5A7581"
+    },
+    "source": "https://github.com/yt-dlp/yt-dlp/archive/refs/tags/2026.08.19.tar.gz",
+    "license": "GPL-3.0-or-later for the official PyInstaller Windows executable; bundled notices apply"
+  },
+  "ffmpeg": {
+    "version": "n9.0.1-26-g5c8e7e2433-20260906",
+    "upstream": "https://ffmpeg.org/",
+    "binaryProvider": "https://github.com/BtbN/FFmpeg-Builds",
+    "providerTag": "autobuild-2026-09-06-13-06",
+    "providerCommit": "8267213e26c1031621e6e1210fe3aa4867214f6a",
+    "asset": {
+      "name": "ffmpeg-n9.0.1-26-g5c8e7e2433-win64-lgpl-9.0.zip",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-06-13-06/ffmpeg-n9.0.1-26-g5c8e7e2433-win64-lgpl-9.0.zip",
+      "size": 147006079,
+      "sha256": "4700c0bcb523466fdf5e36e22ad4ff3fadf33f203e2dbfdc78f5b4cd068b8818"
+    },
+    "checksumFile": {
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-06-13-06/checksums.sha256",
+      "size": 5728,
+      "sha256": "4531517664e64c64ddb76248e2b92ed0587130abe5b3f78944c909a0cfd6d061"
+    },
+    "upstreamSource": "https://github.com/FFmpeg/FFmpeg/commit/5c8e7e2433",
+    "buildSource": "https://github.com/BtbN/FFmpeg-Builds/tree/8267213e26c1031621e6e1210fe3aa4867214f6a",
+    "license": "LGPL-3.0-or-later build; GPL-only libraries such as libx264/libx265 are disabled"
+  },
+  "portableFiles": {
+    "yt-dlp.exe": {
+      "size": 17840399,
+      "sha256": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+    },
+    "ffmpeg.exe": {
+      "size": 114400768,
+      "sha256": "48a2a8da07b627335489956064a9b51e081f0d677cfeff154dd89b5af2dcaeff"
+    },
+    "ffprobe.exe": {
+      "size": 114198528,
+      "sha256": "aeddf918ef0542997c7db606c23bc516881e43409c39de436516a22d00d588ed"
+    }
+  },
+  "licenseFiles": {
+    "yt-dlp-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.08.19/LICENSE",
+      "size": 1211,
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    },
+    "yt-dlp-THIRD_PARTY_LICENSES.txt": {
+      "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.08.19/THIRD_PARTY_LICENSES.txt",
+      "size": 243550,
+      "sha256": "472aefe951c7db35e1657c1d13fd337140511ed6f2b329205105ad441c5a02b7"
+    },
+    "GPL-3.0.txt": {
+      "url": "https://www.gnu.org/licenses/gpl-3.0.txt",
+      "size": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "BtbN-FFmpeg-Builds-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/BtbN/FFmpeg-Builds/8267213e26c1031621e6e1210fe3aa4867214f6a/LICENSE",
+      "size": 1064,
+      "sha256": "c1b3cc7eec42bd9c4f6247169bb887b4a9bc904abfd2a7f7f9231ed357844993"
+    },
+    "FFmpeg-LICENSE.txt": {
+      "archivePath": "LICENSE.txt",
+      "size": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    }
+  }
+}

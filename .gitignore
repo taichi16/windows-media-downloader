@@ -1,0 +1,14 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/bin/*.exe
+src-tauri/resources/sidecar-manifest.json
+!src-tauri/resources/licenses/*.txt
+.tool-cache/
+.supply-chain-cache/
+.live-smoke/
+.archive-smoke-*/
+dist-portable/
+*.log
+benchmarks/out/

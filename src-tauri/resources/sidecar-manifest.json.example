@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "files": {
+    "yt-dlp.exe": "REPLACE_WITH_64_HEX_SHA256",
+    "ffmpeg.exe": "REPLACE_WITH_64_HEX_SHA256",
+    "ffprobe.exe": "REPLACE_WITH_64_HEX_SHA256"
+  }
+}

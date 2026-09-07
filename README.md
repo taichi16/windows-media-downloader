@@ -13,17 +13,19 @@
 ## 功能範圍
 
 - 保留 YouTube、YouTube Music；小鴨影音只接受 `play.777tv.ai`；歐樂影院只接受 `olevod.com` 與 `www.olevod.com`。Facebook（條件式）只接受 `www.facebook.com` 的公開匿名 `/reel/<純數字ID>` 或 `/<頁面純數字ID>/videos/pcb.<貼文純數字ID>/<影片純數字ID>` 形態（亦接受其最小化 canonical page/video ID 形態）；PCB 是 path segment，Facebook 任一 query 一律拒絕，fragment 只會正規化移除，群組／私人／直播／watch／profile 路徑及 fbcdn URL 一律拒絕。Facebook 僅對本報告記載的兩個使用者授權公開 URL 條件式驗證，不宣稱整站或未來可用。2026-09-07 的 YouTube／YouTube Music 公開 URL 不下載 probe 均成功，但完整格式支援仍待將 yt-dlp 的 EJS 與受信任 JavaScript runtime 納入 manifest、來源與版本鎖定。
+- MMOV（實驗性／條件式）只接受 `https://hk.mmov.io/vodplay/<數字作品ID>/<數字線路>-<數字集數>.html`；來源不得含 query、fragment、userinfo、顯式 port 或 percent encoding。Rust adapter 只以固定 native-TLS client 解析唯一 `videoSrc`，不執行 JavaScript、不接受使用者直接輸入 CDN URL；HLS egress 僅允許 `bfikuncdn.com:443` 與 `kkzycdn.com:65`，每個請求都做精確 effective-port、公開 DNS/peer 檢查。2026-09-07 一個使用者授權公開來源已完成條件式 adapter/probe/video smoke 驗證，不宣稱整站或未來支援。
 - 僅 HTTPS；固定平台/hostname allowlist；啟動下載前再次 DNS 解析並拒絕 IP literal、userinfo、localhost、私有、loopback、link-local、multicast、保留位址。
 - 小鴨影音／歐樂影院 adapter 只解析頁面內固定 JSON，不執行 JavaScript；要求 `encrypt`、`trysee`、`points` 均為數字 0，並驗證 HLS host、所有 URI host、公開 DNS/peer、三層上限、5,000 URI 上限、`#EXTM3U`、VOD `#EXT-X-ENDLIST`，遇到 key 或 live playlist 即拒絕。
+- MMOV adapter 同樣只允許最多 3 層、5,000 個 URI、4096 字元 URI 的 HLS VOD；最多檢查 32 個 distinct manifest、aggregate response body 8 MiB，整段 HLS scan 60 秒 timeout，單一 response 1 MiB／20 秒 timeout。manifest 必須以 `#EXTM3U` 開頭，leaf 必須有 `#EXT-X-ENDLIST`，只允許 `METHOD=NONE` 且無 URI 的 `EXT-X-KEY`，任何加密、live-only tag、DASH、master/leaf 混合或非 allowlist URI 均 fail closed。
 - 每批與全域未完成佇列最多 5 筆，預設最多 3 筆同時工作；支援 audio（MP3）與 video 模式。同一批或既有排隊／執行中的工作若具有相同平台、正規化 URL 與模式會原子拒絕重複；相同平台與 URL 但 audio/video 模式不同則是不同工作。已完成、失敗或取消的歷史工作不阻止使用者重新提交。
-- probe 使用固定 `yt-dlp --ignore-config --no-plugin-dirs --no-js-runtimes --no-remote-components --no-playlist --simulate --skip-download --print` 最小 JSON metadata template，不建立輸出檔；明確 DRM、需登入、受限 availability、直播／排程／已結束直播 lifecycle、playlist marker 或未知非空狀態則拒絕，缺省 optional 欄位不誤判為 DRM。Facebook 的 probe 另要求 extractor 為 `facebook`。每筆實際下載前都會重新執行相同 probe。
+- probe 使用固定 `yt-dlp --ignore-config --no-plugin-dirs --no-js-runtimes --no-remote-components --no-playlist --simulate --skip-download --print` 最小 JSON metadata template，不建立輸出檔；明確 DRM、需登入、受限 availability、直播／排程／已結束直播 lifecycle、playlist marker 或未知非空狀態則拒絕，缺省 optional 欄位不誤判為 DRM。Facebook 的 probe 另要求 extractor 為 `facebook`；MMOV 的 probe 另要求 extractor=`generic` 且 protocol=`m3u8_native`，並且其 target 必須先由 Rust adapter/HLS scanner 驗證。每筆實際下載前都會重新執行相同 probe。
 - 下載使用固定、已驗證的 resources sidecar 路徑，不接受任意 CLI 參數或輸出路徑；固定停用未驗證 plugin、JavaScript runtime 與 remote component。兩個直接 HLS 平台固定 `--concurrent-fragments 4`，全域最多 3 筆工作；使用 `.incomplete/<UUID>` 暫存，成功後才移入本批 Rust 驗證後的輸出根。
 - 輸出目錄由 Rust 持有；前端 IPC payload 不含路徑。預設根為 `Downloads\Windows Media Downloader`，自訂根只保存於 app-local schema-versioned JSON，寫入前後會檢查一般檔案、大小、reparse point 與原子替換。選取及每批啟動前會拒絕 UNC、mapped drive、磁碟根、不可寫、Windows／Program Files／ProgramData、程式及 resources 目錄與其子目錄；自訂目錄消失時不會偷偷重建，工作實際開始前會再次驗證。這些檢查無法消除同一權限程序的極短 TOCTOU，詳見 `SECURITY.md`。
 - 單筆/全部取消會以 Windows `taskkill.exe /PID /T /F`（絕對路徑、非 shell）終止程序樹，再回收 child handle。
 - 工作狀態卡可個別移除或清除所有已結束卡片；這些操作只改本機 UI 狀態，不刪除媒體檔、不終止其他工作，也不清除下載紀錄。排隊中／執行中的工作必須先取消。
 - 下載紀錄使用 bundled SQLite（`app_local_data_dir()/download-history.sqlite3`），只在終態以去敏平台、模式、來源、標題、檔名、固定錯誤類別與時間欄位落盤；不保存完整輸出路徑、Cookie、token 或 sidecar 輸出。最多保留 1,000 筆，UI 顯示最新 100 筆；累計工作耗時是每筆從接受排程至終態（含佇列等待）的加總，並行時不是牆鐘時間。資料庫損壞、鎖定或寫入失敗會顯示固定 warning、不中斷下載；「清除全部歷史」只清除 SQLite 紀錄，不刪媒體或狀態卡。
 
-字幕、跨重啟續傳、自動更新、登入/Cookie、CAPTCHA、地區/付費牆/DRM/存取控制繞過均刻意不支援。2026-09-07 已針對使用者指定的各一個小鴨影音與歐樂影院公開 URL 完成 adapter、probe 與極短 live smoke；這只證明當時指定頁面可用，不是對整個網站或未來版本的永久保證。詳見 `LIVE_TEST_REPORT.md`。
+字幕、跨重啟續傳、自動更新、登入/Cookie、CAPTCHA、地區/付費牆/DRM/存取控制繞過均刻意不支援。小鴨影音、歐樂影院與 MMOV 均僅對報告記載的指定公開來源條件式驗證，不是整站或未來版本保證。MMOV smoke 的精確 cut 使用 `force-keyframes` 造成樣本轉碼，不能推論正式下載 codec/速度；66 分鐘及 20 分鐘完整效能閘門均為 `not-evaluated`。詳見 `LIVE_TEST_REPORT.md`。
 
 ## 建置
 
@@ -89,7 +91,7 @@ SHA-256 manifest 不是執行期信任根：若攻擊者能同時替換 binary �
 
 ## 測試與 benchmark
 
-Rust 測試涵蓋 URL/hostname、特殊 IP、userinfo、第五/第六筆、平台 adapter、HLS VOD/key/host/上限、固定 probe/下載參數、進度解析、路徑 traversal、sidecar hash。預設測試不連網；live adapter 測試必須明確設定兩個環境變數並以 `--ignored` 執行。前端 `npm run build` 同時執行 TypeScript typecheck 與 Vite build。
+Rust 測試涵蓋 URL/hostname、特殊 IP、userinfo、第五/第六筆、平台 adapter、HLS VOD/key/host/上限、固定 probe/下載參數、進度解析、路徑 traversal、sidecar hash。預設測試不連網；live adapter 測試必須明確設定各平台對應的環境變數（含 `WMD_LIVE_MMOV_URL`）並以 `--ignored` 執行。前端 `npm run build` 同時執行 TypeScript typecheck 與 Vite build。
 
 可控本機 loopback HTTP fixture benchmark（不連外網、不冒充 live 站台）：
 
@@ -97,6 +99,6 @@ Rust 測試涵蓋 URL/hostname、特殊 IP、userinfo、第五/第六筆、平�
 node scripts/benchmark-fixture.mjs --fixture-mib 64 --repetitions 3 --out-dir benchmarks/out
 ```
 
-它會啟動僅綁定 `127.0.0.1` 的 HTTP Range fixture server，以實際 HTTP response stream、hash 完整性與 concurrency 1/2/3/5 測量 fixture 分塊 1/2/4/8；每組至少三次取 median，輸出 JSON 與 Markdown。這個 server 不經應用程式 SSRF allowlist，分塊數只代表本機 Range 請求，不代表 yt-dlp 網路 fragment。未提供外部 baseline 時 `gate=not-evaluated`；只有明確傳入 `--baseline-minutes N` 才會在 N > 20 時標記 `gate=fail`，否則標記 `pass`。`--fixture-mib`（1..512）與 `--repetitions`（3..20）必須是有限安全整數且有上限。fixture 數據不能推論 yt-dlp、ffmpeg、YouTube、小鴨影音或歐樂影院 live 表現。
+它會啟動僅綁定 `127.0.0.1` 的 HTTP Range fixture server，以實際 HTTP response stream、hash 完整性與 concurrency 1/2/3/5 測量 fixture 分塊 1/2/4/8；每組至少三次取 median，輸出 JSON 與 Markdown。這個 server 不經應用程式 SSRF allowlist，分塊數只代表本機 Range 請求，不代表 yt-dlp 網路 fragment。未提供外部 baseline 時 `gate=not-evaluated`；只有明確傳入 `--baseline-minutes N` 才會在 N > 20 時標記 `gate=fail`，否則標記 `pass`。`--fixture-mib`（1..512）與 `--repetitions`（3..20）必須是有限安全整數且有上限。fixture 數據不能推論 yt-dlp、ffmpeg、YouTube、小鴨影音、歐樂影院或 MMOV live 表現；MMOV 尚無 20 分鐘或 66 分鐘外部完整基準，兩者均維持 `not-evaluated`。
 
 安全細節、redirect/DNS rebinding 限制與威脅模型請見 `SECURITY.md`、`THREAT_MODEL.md`；平台狀態請見 `PLATFORM_CAPABILITIES.md`。

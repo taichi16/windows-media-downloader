@@ -64,13 +64,14 @@ pub struct ProbeData {
     pub webpage_url: Option<String>,
     pub availability: Option<String>,
     pub has_drm: Option<bool>,
+    pub protocol: Option<String>,
     pub is_live: Option<bool>,
     pub live_status: Option<String>,
     pub playlist_id: Option<String>,
     pub playlist_count: Option<u64>,
 }
 
-const PROBE_PRINT_TEMPLATE: &str = r#"{"title":%(title|null)j,"duration":%(duration|null)j,"extractor":%(extractor|null)j,"webpage_url":%(webpage_url|null)j,"availability":%(availability|null)j,"has_drm":%(formats.:.{has_drm}|[])j,"is_live":%(is_live|null)j,"live_status":%(live_status|null)j,"playlist_id":%(playlist_id|null)j,"playlist_count":%(playlist_count|null)j}"#;
+const PROBE_PRINT_TEMPLATE: &str = r#"{"title":%(title|null)j,"duration":%(duration|null)j,"extractor":%(extractor|null)j,"webpage_url":%(webpage_url|null)j,"availability":%(availability|null)j,"has_drm":%(formats.:.{has_drm}|[])j,"protocol":%(protocol|null)j,"is_live":%(is_live|null)j,"live_status":%(live_status|null)j,"playlist_id":%(playlist_id|null)j,"playlist_count":%(playlist_count|null)j}"#;
 
 struct ManagerInner {
     jobs: Mutex<BTreeMap<String, DownloadStatus>>,
@@ -932,8 +933,6 @@ pub fn build_ytdlp_args(
         "--no-plugin-dirs".to_string(),
         "--no-js-runtimes".to_string(),
         "--no-remote-components".to_string(),
-        "--compat-options".to_string(),
-        "no-certifi".to_string(),
         "--no-playlist".to_string(),
         "--newline".to_string(),
         "--progress".to_string(),
@@ -948,6 +947,7 @@ pub fn build_ytdlp_args(
         "--output".to_string(),
         output_template.to_string_lossy().into_owned(),
     ];
+    append_platform_tls_options(&mut args, request.platform);
     append_platform_headers(&mut args, request.platform);
     append_platform_download_options(&mut args, request.platform);
     if matches!(request.mode, DownloadMode::Audio) {
@@ -987,8 +987,6 @@ pub fn build_probe_args(
         "--no-plugin-dirs".to_string(),
         "--no-js-runtimes".to_string(),
         "--no-remote-components".to_string(),
-        "--compat-options".to_string(),
-        "no-certifi".to_string(),
         "--no-playlist".to_string(),
         "--simulate".to_string(),
         "--skip-download".to_string(),
@@ -997,15 +995,27 @@ pub fn build_probe_args(
         "--no-warnings".to_string(),
         "--no-progress".to_string(),
     ];
+    append_platform_tls_options(&mut args, request.platform);
     append_platform_headers(&mut args, request.platform);
     args.extend(["--".to_string(), target.url().to_string()]);
     Ok(args)
 }
 
+fn append_platform_tls_options(args: &mut Vec<String>, platform: crate::security::Platform) {
+    if platform == crate::security::Platform::Mmov {
+        // MMOV's current certificate chain validates with the Windows native
+        // trust store but not yt-dlp's bundled certifi roots. This keeps TLS
+        // verification enabled and does not alter any other platform.
+        args.extend(["--compat-options".to_string(), "no-certifi".to_string()]);
+    }
+}
+
 fn append_platform_headers(args: &mut Vec<String>, platform: crate::security::Platform) {
     if matches!(
         platform,
-        crate::security::Platform::LittleDuck | crate::security::Platform::Olevod
+        crate::security::Platform::LittleDuck
+            | crate::security::Platform::Olevod
+            | crate::security::Platform::Mmov
     ) {
         args.extend([
             "--add-headers".to_string(),
@@ -1017,7 +1027,9 @@ fn append_platform_headers(args: &mut Vec<String>, platform: crate::security::Pl
 fn append_platform_download_options(args: &mut Vec<String>, platform: crate::security::Platform) {
     if matches!(
         platform,
-        crate::security::Platform::LittleDuck | crate::security::Platform::Olevod
+        crate::security::Platform::LittleDuck
+            | crate::security::Platform::Olevod
+            | crate::security::Platform::Mmov
     ) {
         args.extend(["--concurrent-fragments".to_string(), "4".to_string()]);
     }
@@ -1049,6 +1061,7 @@ pub fn parse_probe_metadata(stdout: &str) -> Result<ProbeData, AppError> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let has_drm = json.get("has_drm").and_then(normalize_drm_marker);
+    let protocol = optional_probe_string(&json, "protocol")?;
     let is_live = optional_probe_bool(&json, "is_live")?;
     let live_status = optional_probe_string(&json, "live_status")?;
     let playlist_id = optional_probe_string(&json, "playlist_id")?;
@@ -1098,6 +1111,7 @@ pub fn parse_probe_metadata(stdout: &str) -> Result<ProbeData, AppError> {
             .map(str::to_owned),
         availability,
         has_drm,
+        protocol,
         is_live,
         live_status,
         playlist_id,
@@ -1147,6 +1161,20 @@ fn validate_probe_platform(
     {
         return Err(AppError::Security(
             "Facebook probe extractor 不符合允許平台".to_string(),
+        ));
+    }
+    if platform == crate::security::Platform::Mmov
+        && (!probe
+            .extractor
+            .as_deref()
+            .is_some_and(|extractor| extractor.eq_ignore_ascii_case("generic"))
+            || !probe
+                .protocol
+                .as_deref()
+                .is_some_and(|protocol| protocol.eq_ignore_ascii_case("m3u8_native")))
+    {
+        return Err(AppError::Security(
+            "MMOV probe metadata 不是 generic m3u8_native".to_string(),
         ));
     }
     Ok(())
@@ -1380,6 +1408,16 @@ mod tests {
 
     fn target_for(platform: Platform, url: &str) -> ResolvedTarget {
         crate::platform::target_for_test(platform, url)
+    }
+
+    fn args_have_fragment_count(args: &[String], expected: u8) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == "--concurrent-fragments" && pair[1] == expected.to_string())
+    }
+
+    fn assert_no_native_trust_store_option(args: &[String]) {
+        assert!(!args.iter().any(|arg| arg == "--compat-options"));
+        assert!(!args.iter().any(|arg| arg == "no-certifi"));
     }
 
     fn status_for(id: &str, state: JobState) -> DownloadStatus {
@@ -1813,8 +1851,8 @@ mod tests {
         assert!(args.contains(&"--no-plugin-dirs".to_string()));
         assert!(args.contains(&"--no-js-runtimes".to_string()));
         assert!(args.contains(&"--no-remote-components".to_string()));
-        assert!(args.contains(&"--compat-options".to_string()));
-        assert!(args.contains(&"no-certifi".to_string()));
+        assert!(!args.contains(&"--compat-options".to_string()));
+        assert!(!args.contains(&"no-certifi".to_string()));
         assert!(args.contains(&"--no-playlist".to_string()));
         assert_eq!(
             args.last().map(String::as_str),
@@ -1874,6 +1912,7 @@ mod tests {
                         && pair[1] == format!("User-Agent:{PLATFORM_USER_AGENT}")
                 }));
                 assert!(!args.iter().any(|arg| arg.contains("impersonate")));
+                assert_no_native_trust_store_option(&args);
             }
         }
 
@@ -1894,6 +1933,66 @@ mod tests {
         assert!(!youtube_probe
             .iter()
             .any(|arg| arg == "--concurrent-fragments"));
+        assert_no_native_trust_store_option(&youtube_download);
+        assert_no_native_trust_store_option(&youtube_probe);
+
+        let youtube_music_request = request_for(
+            Platform::YoutubeMusic,
+            "https://music.youtube.com/watch?v=normal",
+        );
+        let youtube_music_target = target_for(
+            Platform::YoutubeMusic,
+            "https://music.youtube.com/watch?v=normal",
+        );
+        let youtube_music_download = build_ytdlp_args(
+            &youtube_music_request,
+            Path::new(r"C:\downloads\.incomplete\12345678-1234-1234-1234-123456789012"),
+            &sidecars(),
+            &youtube_music_target,
+        )
+        .expect("YouTube Music download args");
+        let youtube_music_probe =
+            build_probe_args(&youtube_music_request, &youtube_music_target).expect("probe");
+        assert_no_native_trust_store_option(&youtube_music_download);
+        assert_no_native_trust_store_option(&youtube_music_probe);
+    }
+
+    #[test]
+    fn mmov_uses_verified_hls_target_fixed_user_agent_and_fragments() {
+        let request = request_for(Platform::Mmov, "https://hk.mmov.io/vodplay/123456/1-2.html");
+        let target = target_for(Platform::Mmov, "https://kkzycdn.com:65/video/master.m3u8");
+        let download = build_ytdlp_args(
+            &request,
+            Path::new(r"C:\downloads\.incomplete\12345678-1234-1234-1234-123456789012"),
+            &sidecars(),
+            &target,
+        )
+        .expect("MMOV download args");
+        let probe = build_probe_args(&request, &target).expect("MMOV probe args");
+        for args in [&download, &probe] {
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("https://kkzycdn.com:65/video/master.m3u8")
+            );
+            assert!(args.windows(2).any(|pair| {
+                pair[0] == "--add-headers" && pair[1] == format!("User-Agent:{PLATFORM_USER_AGENT}")
+            }));
+            assert!(!args.iter().any(|arg| arg == "--impersonate"));
+            assert!(args
+                .windows(2)
+                .any(|pair| { pair[0] == "--compat-options" && pair[1] == "no-certifi" }));
+        }
+        assert!(args_have_fragment_count(
+            &build_ytdlp_args(
+                &request,
+                Path::new(r"C:\downloads\.incomplete\12345678-1234-1234-1234-123456789012"),
+                &sidecars(),
+                &target,
+            )
+            .expect("MMOV download args"),
+            4
+        ));
+        assert!(!args_have_fragment_count(&probe, 4));
     }
 
     #[test]
@@ -1926,6 +2025,7 @@ mod tests {
                     || arg == "--impersonate"
                     || arg.contains("fbcdn")
             }));
+            assert_no_native_trust_store_option(&args);
             assert!(args.iter().any(|arg| arg == "--no-plugin-dirs"));
             assert!(args.iter().any(|arg| arg == "--no-js-runtimes"));
             assert!(args.iter().any(|arg| arg == "--no-remote-components"));
@@ -1964,13 +2064,14 @@ mod tests {
         assert!(args.contains(&"--no-plugin-dirs".to_string()));
         assert!(args.contains(&"--no-js-runtimes".to_string()));
         assert!(args.contains(&"--no-remote-components".to_string()));
-        assert!(args.contains(&"--compat-options".to_string()));
-        assert!(args.contains(&"no-certifi".to_string()));
+        assert!(!args.contains(&"--compat-options".to_string()));
+        assert!(!args.contains(&"no-certifi".to_string()));
         assert!(args.contains(&"--print".to_string()));
         assert!(args.iter().any(|arg| arg.contains("%(title|null)j")));
         assert!(args
             .iter()
             .any(|arg| arg.contains("%(formats.:.{has_drm}|[])j")));
+        assert!(args.iter().any(|arg| arg.contains("%(protocol|null)j")));
         assert!(args.iter().any(|arg| arg.contains("%(is_live|null)j")));
         assert!(args.iter().any(|arg| arg.contains("%(live_status|null)j")));
         assert!(args.iter().any(|arg| arg.contains("%(playlist_id|null)j")));
@@ -1982,15 +2083,16 @@ mod tests {
             args.last().map(String::as_str),
             Some("https://www.youtube.com/watch?v=normal")
         );
-        assert_eq!(args.len(), 15);
+        assert_eq!(args.len(), 13);
     }
 
     #[test]
     fn probe_metadata_is_minimal_and_rejects_drm_login_and_large_fields() {
-        let valid = r#"{"title":"safe","duration":12.5,"extractor":"fixture","webpage_url":"https://www.youtube.com/watch?v=x","availability":"public","has_drm":false,"is_live":false,"live_status":"not_live","playlist_id":null,"playlist_count":null}"#;
+        let valid = r#"{"title":"safe","duration":12.5,"extractor":"fixture","webpage_url":"https://www.youtube.com/watch?v=x","availability":"public","has_drm":false,"protocol":"https","is_live":false,"live_status":"not_live","playlist_id":null,"playlist_count":null}"#;
         let parsed = parse_probe_metadata(valid).expect("valid metadata");
         assert_eq!(parsed.title.as_deref(), Some("safe"));
         assert_eq!(parsed.duration_seconds, Some(12.5));
+        assert_eq!(parsed.protocol.as_deref(), Some("https"));
         assert_eq!(parsed.is_live, Some(false));
         assert_eq!(parsed.live_status.as_deref(), Some("not_live"));
         assert_eq!(parsed.playlist_id, None);
@@ -2091,6 +2193,26 @@ mod tests {
         assert!(validate_probe_platform(Platform::Youtube, &wrong).is_ok());
         let missing = parse_probe_metadata(r#"{"live_status":"not_live"}"#).expect("metadata");
         assert!(validate_probe_platform(Platform::Facebook, &missing).is_err());
+    }
+
+    #[test]
+    fn mmov_probe_requires_generic_m3u8_native() {
+        let valid = parse_probe_metadata(
+            r#"{"extractor":"generic","protocol":"m3u8_native","live_status":null,"playlist_id":null}"#,
+        )
+        .expect("MMOV metadata");
+        assert!(validate_probe_platform(Platform::Mmov, &valid).is_ok());
+        for metadata in [
+            r#"{"extractor":"facebook","protocol":"m3u8_native"}"#,
+            r#"{"extractor":"generic","protocol":"https"}"#,
+            r#"{"extractor":"generic"}"#,
+        ] {
+            let parsed = parse_probe_metadata(metadata).expect("metadata shape");
+            assert!(
+                validate_probe_platform(Platform::Mmov, &parsed).is_err(),
+                "must reject {metadata}"
+            );
+        }
     }
 
     #[test]

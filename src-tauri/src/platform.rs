@@ -1,7 +1,7 @@
 //! 平台頁面 adapter 與直接 HLS 目標的安全解析。
 //!
-//! 小鴨影音與歐樂影院的頁面會以 JavaScript 變數攜帶播放資訊。本模組只
-//! 解析該變數後的第一個 JSON object，不執行 JavaScript，也不讓頁面內容
+//! 小鴨影音與歐樂影院的頁面會以 JavaScript 變數攜帶播放資訊；MMOV
+//! 頁面只讀取固定的 `videoSrc` 字串。本模組只解析資料，不執行 JavaScript，也不讓頁面內容
 //! 改寫 yt-dlp 參數。所有頁面、媒體與 HLS manifest 請求均使用明確設定的
 //! native TLS client、禁止 redirect、禁止 proxy，並再次檢查 DNS 與連線
 //! peer 位址。
@@ -29,12 +29,19 @@ const HTML_MAX_BYTES: usize = 1024 * 1024;
 const HLS_MAX_BYTES: usize = 1024 * 1024;
 const HLS_MAX_URIS: usize = 5000;
 const HLS_MAX_LAYERS: usize = 3;
+const HLS_MAX_MANIFESTS: usize = 32;
+const HLS_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const HLS_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_URI_LENGTH: usize = 4096;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const PLATFORM_USER_AGENT: &str = "WindowsMediaDownloader/0.1";
 
 const LITTLE_DUCK_MARKER: &str = "var player_data";
 const OLEVOD_MARKER: &str = "var player_aaaa";
+const MMOV_MEDIA_HOST_BFIKUN: &str = "bfikuncdn.com";
+const MMOV_MEDIA_HOST_KKZY: &str = "kkzycdn.com";
+const MMOV_MEDIA_PORT_BFIKUN: u16 = 443;
+const MMOV_MEDIA_PORT_KKZY: u16 = 65;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedTarget {
@@ -55,7 +62,8 @@ impl ResolvedTarget {
 /// 將前端提供的來源 URL 解析成 manager 唯一可使用的 verified target。
 ///
 /// YouTube、YouTube Music 與 Facebook 把已正規化的來源 URL 交給 yt-dlp；
-/// 兩個直接 HLS 平台則先讀取公開頁面並把播放 URL 及其 HLS manifest 驗證完畢。
+/// 直接 HLS 平台與 MMOV 則先讀取公開頁面並把播放 URL 及其 HLS manifest
+/// 驗證完畢，才把 verified target 交給 manager。
 pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<ResolvedTarget, AppError> {
     let source = validate_url_with_dns(request.platform, &request.url)?;
     match request.platform {
@@ -72,7 +80,10 @@ pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<Resolved
             let marker = match request.platform {
                 Platform::LittleDuck => LITTLE_DUCK_MARKER,
                 Platform::Olevod => OLEVOD_MARKER,
-                Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => unreachable!(),
+                Platform::Youtube
+                | Platform::YoutubeMusic
+                | Platform::Facebook
+                | Platform::Mmov => unreachable!(),
             };
             let player = parse_player_object(html.as_bytes(), marker)?;
             let target = parse_player_target(request.platform, &player)?;
@@ -81,6 +92,19 @@ pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<Resolved
             Ok(ResolvedTarget {
                 platform: request.platform,
                 url: target_url,
+            })
+        }
+        Platform::Mmov => {
+            let source_url = Url::parse(&source.url)?;
+            let client = build_client()?;
+            let body = bounded_get(&client, &source_url, HTML_MAX_BYTES).await?;
+            let html = std::str::from_utf8(&body)
+                .map_err(|_| AppError::Security("MMOV 頁面不是 UTF-8 HTML".to_string()))?;
+            let target = parse_mmov_video_src(html.as_bytes())?;
+            inspect_hls(&client, Platform::Mmov, target.clone()).await?;
+            Ok(ResolvedTarget {
+                platform: Platform::Mmov,
+                url: target.to_string(),
             })
         }
     }
@@ -102,12 +126,13 @@ fn build_client() -> Result<Client, AppError> {
 }
 
 async fn bounded_get(client: &Client, url: &Url, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+    let endpoint = endpoint_for_url(url)?;
     let response = client
         .get(url.clone())
         .send()
         .await
         .map_err(|error| AppError::Security(format!("平台 HTTPS 請求失敗：{error}")))?;
-    validate_response_peer(&response)?;
+    validate_response_peer(&response, &endpoint)?;
     if !response.status().is_success() {
         return Err(AppError::Security(format!(
             "平台回應不是 2xx：{}",
@@ -117,13 +142,42 @@ async fn bounded_get(client: &Client, url: &Url, max_bytes: usize) -> Result<Vec
     read_response_bounded(response, max_bytes).await
 }
 
-fn validate_response_peer(response: &Response) -> Result<(), AppError> {
+#[derive(Debug, Clone)]
+struct ExpectedEndpoint {
+    port: u16,
+    public_ips: HashSet<IpAddr>,
+}
+
+fn endpoint_for_url(url: &Url) -> Result<ExpectedEndpoint, AppError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::Security("HTTPS URL 缺少主機名稱".to_string()))?
+        .to_ascii_lowercase();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AppError::Security("HTTPS URL 缺少有效連接埠".to_string()))?;
+    let public_ips = resolve_public_dns(&host, port)?
+        .into_iter()
+        .map(|address| address.ip())
+        .collect::<HashSet<_>>();
+    Ok(ExpectedEndpoint { port, public_ips })
+}
+
+fn validate_response_peer(
+    response: &Response,
+    endpoint: &ExpectedEndpoint,
+) -> Result<(), AppError> {
     let peer = response
         .remote_addr()
         .ok_or_else(|| AppError::Security("HTTPS response 缺少 remote_addr".to_string()))?;
     if is_disallowed_ip(peer.ip()) {
         return Err(AppError::Security(
             "HTTPS peer 是私有、loopback、link-local、multicast 或保留位址".to_string(),
+        ));
+    }
+    if peer.port() != endpoint.port || !endpoint.public_ips.contains(&peer.ip()) {
+        return Err(AppError::Security(
+            "HTTPS response peer 與本次 DNS endpoint 不一致".to_string(),
         ));
     }
     Ok(())
@@ -176,6 +230,88 @@ fn parse_player_object(html: &[u8], marker: &str) -> Result<Value, AppError> {
     Ok(value)
 }
 
+fn parse_mmov_video_src(html: &[u8]) -> Result<Url, AppError> {
+    const VAR_TOKEN: &[u8] = b"var";
+    const NAME: &[u8] = b"videoSrc";
+    let mut cursor = 0;
+    let mut found = None;
+    while let Some(relative) = html[cursor..]
+        .windows(VAR_TOKEN.len())
+        .position(|window| window == VAR_TOKEN)
+    {
+        let start = cursor + relative;
+        if is_token_boundary(html, start, VAR_TOKEN.len()) {
+            let mut index = start + VAR_TOKEN.len();
+            skip_ascii_whitespace(html, &mut index);
+            if html.get(index..index + NAME.len()) == Some(NAME)
+                && is_token_boundary(html, index, NAME.len())
+            {
+                index += NAME.len();
+                skip_ascii_whitespace(html, &mut index);
+                if html.get(index) != Some(&b'=') {
+                    return Err(AppError::Security(
+                        "MMOV videoSrc assignment 格式錯誤".to_string(),
+                    ));
+                }
+                index += 1;
+                skip_ascii_whitespace(html, &mut index);
+                let quote = *html
+                    .get(index)
+                    .ok_or_else(|| AppError::Security("MMOV videoSrc 缺少引號".to_string()))?;
+                if quote != b'\'' && quote != b'"' {
+                    return Err(AppError::Security(
+                        "MMOV videoSrc 必須是引號字串".to_string(),
+                    ));
+                }
+                index += 1;
+                let value_start = index;
+                while let Some(byte) = html.get(index) {
+                    if *byte == b'\\' {
+                        return Err(AppError::Security(
+                            "MMOV videoSrc 不接受跳脫字元".to_string(),
+                        ));
+                    }
+                    if *byte == quote {
+                        break;
+                    }
+                    index += 1;
+                }
+                if html.get(index) != Some(&quote) {
+                    return Err(AppError::Security("MMOV videoSrc 字串未封閉".to_string()));
+                }
+                let value = std::str::from_utf8(&html[value_start..index])
+                    .map_err(|_| AppError::Security("MMOV videoSrc 不是 UTF-8".to_string()))?;
+                let target = validate_mmov_media_url(value)?;
+                if found.replace(target).is_some() {
+                    return Err(AppError::Security("MMOV 頁面包含多個 videoSrc".to_string()));
+                }
+            }
+        }
+        cursor = start + VAR_TOKEN.len();
+    }
+    found.ok_or_else(|| AppError::Security("MMOV 頁面缺少唯一 videoSrc".to_string()))
+}
+
+fn is_token_boundary(bytes: &[u8], start: usize, length: usize) -> bool {
+    let before_ok = start == 0 || !is_identifier_byte(bytes[start - 1]);
+    let after = start.saturating_add(length);
+    let after_ok = after >= bytes.len() || !is_identifier_byte(bytes[after]);
+    before_ok && after_ok
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], index: &mut usize) {
+    while bytes
+        .get(*index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        *index += 1;
+    }
+}
+
 fn parse_player_target(platform: Platform, player: &Value) -> Result<Url, AppError> {
     for field in ["encrypt", "trysee", "points"] {
         let value = player
@@ -207,7 +343,7 @@ fn validate_media_url(platform: Platform, raw: &str) -> Result<Url, AppError> {
     if raw.len() > MAX_URI_LENGTH {
         return Err(AppError::Security("播放 URL 超過長度限制".to_string()));
     }
-    if has_explicit_port(raw) {
+    if platform != Platform::Mmov && has_explicit_port(raw) {
         return Err(AppError::Security(
             "播放與 HLS URL 不得包含連接埠".to_string(),
         ));
@@ -226,9 +362,9 @@ fn validate_hls_url(platform: Platform, url: &Url, require_m3u8: bool) -> Result
             "播放與 HLS URL 只允許 HTTPS".to_string(),
         ));
     }
-    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+    if !url.username().is_empty() || url.password().is_some() {
         return Err(AppError::Security(
-            "播放與 HLS URL 不得包含 userinfo 或連接埠".to_string(),
+            "播放與 HLS URL 不得包含 userinfo".to_string(),
         ));
     }
     let host = url
@@ -240,11 +376,20 @@ fn validate_hls_url(platform: Platform, url: &Url, require_m3u8: bool) -> Result
             "播放與 HLS URL 主機名稱格式不受支援".to_string(),
         ));
     }
-    if !media_host_allowed(platform, &host) {
-        return Err(AppError::Security(format!(
-            "HLS 主機不符合 {} 平台媒體允許清單",
-            platform.as_str()
-        )));
+    if platform == Platform::Mmov {
+        validate_mmov_media_endpoint(url, &host)?;
+    } else {
+        if url.port().is_some() {
+            return Err(AppError::Security(
+                "播放與 HLS URL 不得包含連接埠".to_string(),
+            ));
+        }
+        if !media_host_allowed(platform, &host) {
+            return Err(AppError::Security(format!(
+                "HLS 主機不符合 {} 平台媒體允許清單",
+                platform.as_str()
+            )));
+        }
     }
     if require_m3u8
         && !url
@@ -258,11 +403,62 @@ fn validate_hls_url(platform: Platform, url: &Url, require_m3u8: bool) -> Result
     Ok(url.clone())
 }
 
+fn validate_mmov_media_url(raw: &str) -> Result<Url, AppError> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.len() > MAX_URI_LENGTH
+        || !raw.is_ascii()
+        || raw.contains('%')
+        || raw
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'\\')
+    {
+        return Err(AppError::Security(
+            "MMOV videoSrc URL 長度、encoding 或 path 字元不受支援".to_string(),
+        ));
+    }
+    let url = Url::parse(raw)
+        .map_err(|error| AppError::Security(format!("MMOV videoSrc URL 無法解析：{error}")))?;
+    validate_hls_url(Platform::Mmov, &url, true)
+}
+
+fn validate_mmov_media_endpoint(url: &Url, host: &str) -> Result<(), AppError> {
+    if host.ends_with('.') || !host.is_ascii() || host.parse::<IpAddr>().is_ok() {
+        return Err(AppError::Security(
+            "MMOV HLS 主機名稱格式不受支援".to_string(),
+        ));
+    }
+    if url.as_str().contains('%') {
+        return Err(AppError::Security(
+            "MMOV HLS URL 不接受 percent encoding".to_string(),
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(AppError::Security(
+            "MMOV HLS URL 不得包含 query 或 fragment".to_string(),
+        ));
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AppError::Security("MMOV HLS URL 缺少連接埠".to_string()))?;
+    let allowed = matches!(
+        (host, port),
+        (MMOV_MEDIA_HOST_BFIKUN, MMOV_MEDIA_PORT_BFIKUN)
+            | (MMOV_MEDIA_HOST_KKZY, MMOV_MEDIA_PORT_KKZY)
+    );
+    if !allowed {
+        return Err(AppError::Security(
+            "MMOV HLS endpoint 不符合固定 host/port allowlist".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn media_host_allowed(platform: Platform, host: &str) -> bool {
     match platform {
         Platform::LittleDuck => matches!(host, "v2.ppqrrs.com" | "v2.adfg8.vip"),
         Platform::Olevod => host == "europe.olemovienews.com",
-        Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => false,
+        Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook | Platform::Mmov => false,
     }
 }
 
@@ -272,28 +468,73 @@ struct HlsScan {
     uris: Vec<Url>,
 }
 
+#[derive(Debug, Default)]
+struct HlsBudget {
+    manifests: usize,
+    total_bytes: usize,
+}
+
+fn reserve_hls_manifest(budget: &mut HlsBudget) -> Result<(), AppError> {
+    if budget.manifests >= HLS_MAX_MANIFESTS {
+        return Err(AppError::Security(format!(
+            "HLS manifest 數量超過 {} 上限",
+            HLS_MAX_MANIFESTS
+        )));
+    }
+    if budget.total_bytes >= HLS_MAX_TOTAL_BYTES {
+        return Err(AppError::Security(format!(
+            "HLS manifest 總大小超過 {} bytes 上限",
+            HLS_MAX_TOTAL_BYTES
+        )));
+    }
+    budget.manifests += 1;
+    Ok(())
+}
+
+fn account_hls_manifest_bytes(budget: &mut HlsBudget, bytes: usize) -> Result<(), AppError> {
+    let total = budget
+        .total_bytes
+        .checked_add(bytes)
+        .ok_or_else(|| AppError::Security("HLS manifest 總大小超過上限".to_string()))?;
+    if total > HLS_MAX_TOTAL_BYTES {
+        return Err(AppError::Security(format!(
+            "HLS manifest 總大小超過 {} bytes 上限",
+            HLS_MAX_TOTAL_BYTES
+        )));
+    }
+    budget.total_bytes = total;
+    Ok(())
+}
+
 async fn inspect_hls(client: &Client, platform: Platform, root: Url) -> Result<(), AppError> {
+    match tokio::time::timeout(HLS_SCAN_TIMEOUT, inspect_hls_inner(client, platform, root)).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::Security(
+            "HLS manifest 檢查逾時，已拒絕處理".to_string(),
+        )),
+    }
+}
+
+async fn inspect_hls_inner(client: &Client, platform: Platform, root: Url) -> Result<(), AppError> {
     let mut queue = VecDeque::from([(root, 0_usize)]);
     let mut visited = HashSet::new();
     let mut dns_hosts = HashSet::new();
     let mut scan = HlsScan::default();
+    let mut budget = HlsBudget::default();
     while let Some((url, depth)) = queue.pop_front() {
         if !visited.insert(url.to_string()) {
             continue;
         }
-        let host = url
-            .host_str()
-            .ok_or_else(|| AppError::Security("HLS URL 缺少主機名稱".to_string()))?;
-        resolve_hls_host_once(host, &mut dns_hosts)?;
+        // Reserve before each network request so a malicious master cannot
+        // enqueue unbounded distinct child manifests.
+        reserve_hls_manifest(&mut budget)?;
+        resolve_hls_host_once(platform, &url, &mut dns_hosts)?;
         let body = bounded_get(client, &url, HLS_MAX_BYTES).await?;
+        account_hls_manifest_bytes(&mut budget, body.len())?;
         let first_new_uri = scan.uris.len();
         let parsed = parse_hls_manifest(platform, &url, &body, &mut scan)?;
         for uri in &scan.uris[first_new_uri..] {
-            resolve_hls_host_once(
-                uri.host_str()
-                    .ok_or_else(|| AppError::Security("HLS URI 缺少主機名稱".to_string()))?,
-                &mut dns_hosts,
-            )?;
+            resolve_hls_host_once(platform, uri, &mut dns_hosts)?;
         }
         if !parsed.is_empty() && depth + 1 >= HLS_MAX_LAYERS {
             return Err(AppError::Security(
@@ -305,10 +546,24 @@ async fn inspect_hls(client: &Client, platform: Platform, root: Url) -> Result<(
     Ok(())
 }
 
-fn resolve_hls_host_once(host: &str, seen: &mut HashSet<String>) -> Result<(), AppError> {
-    let host = host.to_ascii_lowercase();
-    if seen.insert(host.clone()) {
-        resolve_public_dns(&host, 443)?;
+fn resolve_hls_host_once(
+    platform: Platform,
+    url: &Url,
+    seen: &mut HashSet<String>,
+) -> Result<(), AppError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::Security("HLS URL 缺少主機名稱".to_string()))?
+        .to_ascii_lowercase();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AppError::Security("HLS URL 缺少有效連接埠".to_string()))?;
+    let key = format!("{host}:{port}");
+    if seen.insert(key) {
+        if platform == Platform::Mmov {
+            validate_mmov_media_endpoint(url, &host)?;
+        }
+        resolve_public_dns(&host, port)?;
     }
     Ok(())
 }
@@ -330,21 +585,37 @@ fn parse_hls_manifest(
     let mut children = Vec::new();
     let mut pending_variant = false;
     let mut has_endlist = false;
+    let mut saw_master_playlist = false;
+    let mut saw_media_segment = false;
     for raw_line in lines {
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
-        if line.starts_with("#EXT-X-KEY") || line.starts_with("#EXT-X-SESSION-KEY") {
+        if platform == Platform::Mmov && is_mmov_live_only_tag(line) {
+            return Err(AppError::Security(
+                "MMOV HLS manifest 含有 live-only tag，拒絕處理".to_string(),
+            ));
+        }
+        if line.starts_with("#EXT-X-SESSION-KEY") {
             return Err(AppError::Security(
                 "HLS manifest 含有加密 key，拒絕處理".to_string(),
             ));
+        }
+        if line.starts_with("#EXT-X-KEY") {
+            if platform != Platform::Mmov || !is_mmov_clear_key(line) {
+                return Err(AppError::Security(
+                    "HLS manifest 含有不允許的加密 key，拒絕處理".to_string(),
+                ));
+            }
+            continue;
         }
         if line == "#EXT-X-ENDLIST" {
             has_endlist = true;
             continue;
         }
         if line.starts_with("#EXT-X-STREAM-INF") {
+            saw_master_playlist = true;
             pending_variant = true;
             for raw_uri in uri_attributes(line)? {
                 let uri = resolve_hls_uri(platform, base, raw_uri, scan)?;
@@ -354,10 +625,11 @@ fn parse_hls_manifest(
         }
         if line.starts_with('#') {
             let is_child_attribute =
-                line.starts_with("#EXT-X-MEDIA") || line.starts_with("#EXT-X-I-FRAMES-ONLY");
+                line.starts_with("#EXT-X-MEDIA") || line.starts_with("#EXT-X-I-FRAME-STREAM-INF");
             for raw_uri in uri_attributes(line)? {
                 let uri = resolve_hls_uri(platform, base, raw_uri, scan)?;
                 if is_child_attribute {
+                    saw_master_playlist = true;
                     children.push(uri);
                 }
             }
@@ -367,11 +639,18 @@ fn parse_hls_manifest(
         if pending_variant {
             children.push(uri);
             pending_variant = false;
+        } else {
+            saw_media_segment = true;
         }
     }
     if pending_variant {
         return Err(AppError::Security(
             "HLS STREAM-INF 缺少 variant URI".to_string(),
+        ));
+    }
+    if saw_master_playlist && saw_media_segment {
+        return Err(AppError::Security(
+            "HLS master 與 leaf media 內容混合，拒絕處理".to_string(),
         ));
     }
     if children.is_empty() && !has_endlist {
@@ -380,6 +659,45 @@ fn parse_hls_manifest(
         ));
     }
     Ok(children)
+}
+
+fn is_mmov_live_only_tag(line: &str) -> bool {
+    [
+        "#EXT-X-PART",
+        "#EXT-X-PRELOAD-HINT",
+        "#EXT-X-RENDITION-REPORT",
+        "#EXT-X-SERVER-CONTROL",
+        "#EXT-X-SKIP",
+    ]
+    .iter()
+    .any(|tag| line.starts_with(tag))
+}
+
+fn is_mmov_clear_key(line: &str) -> bool {
+    let Some(attributes) = line.strip_prefix("#EXT-X-KEY:") else {
+        return false;
+    };
+    let mut method_none = false;
+    for attribute in attributes.split(',') {
+        let Some((name, value)) = attribute.split_once('=') else {
+            return false;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name == "METHOD" && value == "NONE" {
+            if method_none {
+                return false;
+            }
+            method_none = true;
+        } else if name == "URI" || name.is_empty() || value.is_empty() {
+            return false;
+        } else {
+            // Do not allow IV, KEYFORMAT or unknown attributes to hide a
+            // key reference on a supposedly clear MMOV playlist.
+            return false;
+        }
+    }
+    method_none
 }
 
 fn uri_attributes(line: &str) -> Result<Vec<&str>, AppError> {
@@ -413,7 +731,18 @@ fn resolve_hls_uri(
     if raw.is_empty() || raw.len() > MAX_URI_LENGTH {
         return Err(AppError::Security("HLS URI 超過長度限制或為空".to_string()));
     }
-    if has_explicit_port(raw) {
+    if platform == Platform::Mmov
+        && (!raw.is_ascii()
+            || raw.contains('%')
+            || raw
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'\\'))
+    {
+        return Err(AppError::Security(
+            "MMOV HLS URI 不接受 raw encoding 或 path 字元".to_string(),
+        ));
+    }
+    if platform != Platform::Mmov && has_explicit_port(raw) {
         return Err(AppError::Security("HLS URI 不得包含連接埠".to_string()));
     }
     scan.uri_count = scan.uri_count.saturating_add(1);
@@ -453,6 +782,7 @@ mod tests {
         match platform {
             Platform::LittleDuck => "https://v2.adfg8.vip/live/master.m3u8",
             Platform::Olevod => "https://europe.olemovienews.com/live/master.m3u8",
+            Platform::Mmov => "https://bfikuncdn.com/live/master.m3u8",
             Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => unreachable!(),
         }
     }
@@ -473,6 +803,68 @@ mod tests {
             let object = parse_player_object(html.as_bytes(), marker).expect("player JSON");
             let target = parse_player_target(platform, &object).expect("target");
             assert_eq!(target.as_str(), media_url(platform));
+        }
+    }
+
+    #[test]
+    fn parses_one_mmov_video_src_without_executing_javascript() {
+        for html in [
+            "prefix var videoSrc = 'https://bfikuncdn.com/live/master.m3u8'; suffix",
+            "prefix var   videoSrc\t=\n\"https://kkzycdn.com:65/live/master.m3u8\"; suffix",
+        ] {
+            let target = parse_mmov_video_src(html.as_bytes()).expect("MMOV videoSrc");
+            assert!(target.scheme() == "https");
+            assert!(matches!(
+                (target.host_str(), target.port_or_known_default()),
+                (Some("bfikuncdn.com"), Some(443)) | (Some("kkzycdn.com"), Some(65))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_multiple_malformed_or_untrusted_mmov_video_src() {
+        for html in [
+            "var other = 'https://bfikuncdn.com/live/master.m3u8';",
+            "var videoSrc = ;",
+            "var videoSrc = 'http://bfikuncdn.com/live/master.m3u8';",
+            "var videoSrc = 'https://evil.example/live/master.m3u8';",
+            "var videoSrc = 'https://user:pass@bfikuncdn.com/live/master.m3u8';",
+            "var videoSrc = 'https://bfikuncdn.com:65/live/master.m3u8';",
+            "var videoSrc = 'https://bfikuncdn.com/live/master.m3u8?token=x';",
+            "var videoSrc = 'https://bfikuncdn.com/live/master.m3u8#fragment';",
+            "var videoSrc = 'https://bfikuncdn.com/live/a%2Fb.m3u8';",
+            "var videoSrc = 'https://bfikuncdn。com/live/master.m3u8';",
+            "var videoSrc = 'https://[::1]/live/master.m3u8';",
+            "var videoSrc = 'https://bfikuncdn.com/live/master.m3u8'; var videoSrc = 'https://bfikuncdn.com/live/other.m3u8';",
+        ] {
+            assert!(
+                parse_mmov_video_src(html.as_bytes()).is_err(),
+                "must reject {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn mmov_media_endpoint_requires_exact_public_host_and_port_shape() {
+        for url in [
+            "https://bfikuncdn.com/live/master.m3u8",
+            "https://bfikuncdn.com:443/live/master.m3u8",
+            "https://kkzycdn.com:65/live/master.m3u8",
+        ] {
+            assert!(validate_mmov_media_url(url).is_ok(), "must allow {url}");
+        }
+        for url in [
+            "https://bfikuncdn.com:65/live/master.m3u8",
+            "https://kkzycdn.com/live/master.m3u8",
+            "https://kkzycdn.com:443/live/master.m3u8",
+            "https://evil.example:65/live/master.m3u8",
+            "https://[::1]:65/live/master.m3u8",
+            "https://kkzycdn.com:65/live/master.m3u8?token=x",
+            "https://kkzycdn.com:65/live/master.m3u8#fragment",
+            "https://kkzycdn.com:65/live/a%2Fb.m3u8",
+            "http://kkzycdn.com:65/live/master.m3u8",
+        ] {
+            assert!(validate_mmov_media_url(url).is_err(), "must reject {url}");
         }
     }
 
@@ -581,6 +973,127 @@ mod tests {
     }
 
     #[test]
+    fn mmov_allows_only_clear_key_and_rejects_child_query_or_fragment() {
+        assert!(scan_manifest(
+            Platform::Mmov,
+            "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_ok());
+        for key in [
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"key\"",
+            "#EXT-X-KEY:METHOD=NONE,URI=\"key\"",
+            "#EXT-X-KEY:METHOD=NONE,IV=0x1",
+            "#EXT-X-KEY:UNKNOWN=NONE",
+            "#EXT-X-KEY:METHOD=NONE,",
+            "#EXT-X-SESSION-KEY:METHOD=NONE",
+        ] {
+            assert!(
+                scan_manifest(
+                    Platform::Mmov,
+                    &format!("#EXTM3U\n{key}\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n")
+                )
+                .is_err(),
+                "must reject {key}"
+            );
+        }
+        for uri in ["segment.ts?token=x", "segment.ts#fragment"] {
+            assert!(
+                scan_manifest(
+                    Platform::Mmov,
+                    &format!("#EXTM3U\n#EXTINF:1,\n{uri}\n#EXT-X-ENDLIST\n")
+                )
+                .is_err(),
+                "must reject {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn mmov_hls_accepts_port_65_scheme_relative_child_only() {
+        let base = Url::parse("https://kkzycdn.com:65/live/master.m3u8").expect("base URL");
+        let mut scan = HlsScan::default();
+        let children = parse_hls_manifest(
+            Platform::Mmov,
+            &base,
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n//kkzycdn.com:65/live/variant.m3u8\n",
+            &mut scan,
+        )
+        .expect("MMOV variant");
+        assert_eq!(children[0].port(), Some(65));
+        let cross_host = parse_hls_manifest(
+            Platform::Mmov,
+            &base,
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n//bfikuncdn.com:443/live/variant.m3u8\n",
+            &mut HlsScan::default(),
+        )
+        .expect("MMOV bfikuncdn variant");
+        assert_eq!(cross_host[0].host_str(), Some("bfikuncdn.com"));
+        assert_eq!(cross_host[0].port_or_known_default(), Some(443));
+
+        assert!(parse_hls_manifest(
+            Platform::Mmov,
+            &base,
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n//kkzycdn.com:443/live/variant.m3u8\n",
+            &mut HlsScan::default(),
+        )
+        .is_err());
+
+        for uri in [
+            "//user:pass@kkzycdn.com:65/live/variant.m3u8",
+            "//evil.example:65/live/variant.m3u8",
+            "//bfikuncdn.com:65/live/variant.m3u8",
+            "//kkzycdn.com:443/live/variant.m3u8",
+            "//[::1]:65/live/variant.m3u8",
+            "//kkzycdn.com:65/live/variant.m3u8?token=x",
+            "//kkzycdn.com:65/live/variant.m3u8#fragment",
+            "//%6bkzycdn.com:65/live/variant.m3u8",
+            "//kkzycdn。com:65/live/variant.m3u8",
+        ] {
+            let manifest = format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n{uri}\n");
+            assert!(
+                parse_hls_manifest(
+                    Platform::Mmov,
+                    &base,
+                    manifest.as_bytes(),
+                    &mut HlsScan::default()
+                )
+                .is_err(),
+                "must reject {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn hls_recurses_iframe_playlist_and_rejects_mmov_live_or_mixed_tags() {
+        let iframe = scan_manifest(
+            Platform::Mmov,
+            "#EXTM3U\n#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1,URI=\"iframe.m3u8\"\n",
+        )
+        .expect("MMOV iframe child");
+        assert_eq!(iframe.len(), 1);
+        assert_eq!(iframe[0].path(), "/live/iframe.m3u8");
+
+        for tag in [
+            "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part.ts\"",
+            "#EXT-X-RENDITION-REPORT:URI=\"other.m3u8\"",
+            "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES",
+            "#EXT-X-SKIP:SKIPPED-SEGMENTS=1",
+            "#EXT-X-PART:DURATION=0.5,URI=\"part.ts\"",
+        ] {
+            assert!(
+                scan_manifest(Platform::Mmov, &format!("#EXTM3U\n{tag}\n#EXT-X-ENDLIST\n"))
+                    .is_err(),
+                "must reject {tag}"
+            );
+        }
+        assert!(scan_manifest(
+            Platform::Mmov,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nvariant.m3u8\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn requires_extm3u_and_endlist_for_leaf_manifest() {
         assert!(scan_manifest(Platform::LittleDuck, "#EXTINF:1,\nsegment.ts\n").is_err());
         assert!(scan_manifest(Platform::LittleDuck, "#EXTM3U\n#EXTINF:1,\nsegment.ts\n").is_err());
@@ -594,6 +1107,25 @@ mod tests {
             "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nvariant.m3u8\n"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn hls_budget_rejects_manifest_count_and_total_bytes_over_limit() {
+        let mut manifest_budget = HlsBudget::default();
+        for _ in 0..HLS_MAX_MANIFESTS {
+            reserve_hls_manifest(&mut manifest_budget).expect("manifest budget slot");
+        }
+        assert!(reserve_hls_manifest(&mut manifest_budget).is_err());
+
+        let mut byte_budget = HlsBudget::default();
+        account_hls_manifest_bytes(&mut byte_budget, HLS_MAX_TOTAL_BYTES - 1)
+            .expect("aggregate byte budget");
+        account_hls_manifest_bytes(&mut byte_budget, 1).expect("exact aggregate limit");
+        assert!(account_hls_manifest_bytes(&mut byte_budget, 1).is_err());
+        assert!(reserve_hls_manifest(&mut byte_budget).is_err());
+
+        let mut overflow_budget = HlsBudget::default();
+        assert!(account_hls_manifest_bytes(&mut overflow_budget, usize::MAX).is_err());
     }
 
     #[test]
@@ -659,6 +1191,7 @@ mod tests {
         let cases = [
             (Platform::LittleDuck, "WMD_LIVE_LITTLE_DUCK_URL"),
             (Platform::Olevod, "WMD_LIVE_OLEVOD_URL"),
+            (Platform::Mmov, "WMD_LIVE_MMOV_URL"),
         ];
         for (platform, variable) in cases {
             let source = std::env::var(variable)

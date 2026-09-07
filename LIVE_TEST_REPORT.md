@@ -1,7 +1,7 @@
 # 指定平台 Live 驗收報告
 
 日期：2026-09-07（Asia/Taipei）  
-範圍：使用者指定的小鴨影音、歐樂影院與 Facebook 公開來源之條件式驗證。完整 URL 不寫入應用程式 log；本報告只記錄平台、媒體 host 與必要技術結果。
+範圍：使用者指定的小鴨影音、歐樂影院、MMOV 與 Facebook 公開來源之條件式驗證。完整 URL 不寫入應用程式 log；本報告只記錄平台、媒體 host 與必要技術結果。
 
 ## 安全閘門
 
@@ -15,7 +15,7 @@
 
 ## Probe
 
-使用鎖定的 yt-dlp `2026.08.19`，參數包含 `--simulate`、`--skip-download`、`--no-playlist`、`--no-plugin-dirs`、`--no-js-runtimes`、`--no-remote-components`。`--compat-options no-certifi` 只讓 Windows standalone 使用作業系統信任鏈，未停用 TLS 驗證。
+使用鎖定的 yt-dlp `2026.08.19`，參數包含 `--simulate`、`--skip-download`、`--no-playlist`、`--no-plugin-dirs`、`--no-js-runtimes`、`--no-remote-components`。只有 MMOV 加入 `--compat-options no-certifi`，讓該平台使用 Windows 作業系統信任鏈且不會停用 TLS 驗證；其他平台不套用此選項。
 
 | 平台 | adapter | 媒體 host | extractor | 時長 | availability | has_drm |
 | --- | --- | --- | --- | ---: | --- | --- |
@@ -65,6 +65,24 @@
 | PCB canonical 公開影片 ID `2093187601588241` | 0 | 2.172 秒 | 1,241,749 bytes MP4 | 3.083 秒；H.264 video-only | 約 571,708 B/s | `ab4316...07d6` |
 
 約 3 秒 smoke 不能代表整片下載；20 分鐘完整基準閘門仍為 `not-evaluated`。第二個樣本本身未含可辨識音訊串流，不代表 audio 模式失效，但表示該來源可能沒有音訊。Facebook 不接受 fbcdn URL、Cookie、token、登入、直播或存取控制繞過。
+
+## MMOV（條件式驗證）
+
+2026-09-07 由 Sol 以一個使用者明確授權的公開來源完成 Rust opt-in adapter 驗證；與既有小鴨影音／歐樂影院回歸同次執行，adapter 測試 1 passed、總耗時 7.71 秒。以下只記錄去敏後的必要結果，不記錄完整 URL、CDN URL/path、title 或執行期 token。
+
+### 安全 probe
+
+- 鎖定的 yt-dlp SHA-256 已吻合；probe 不下載、無 Cookie、無登入、無 bypass，結束碼 0。
+- extractor=`generic`、protocol=`m3u8_native`、duration=4,012 秒、availability=`null`、DRM metadata=`false`；`is_live`、`live_status` 與 playlist markers 均為 `null`。
+- 結果只代表該指定公開頁面在當日條件式通過，不宣稱整站或未來狀態。
+
+### 最小 video smoke
+
+約 3 秒 video smoke 結束碼 0，wall time 7.223 秒，輸出 2,950,946 bytes；以輸出 bytes／牆鐘粗估約 0.39 MiB/s（3.268 Mbit/s），不代表完整下載效能。FFprobe duration=3.040 秒，1920x1080 MPEG-4 video + AAC 44.1kHz stereo。
+
+此精確 cut 使用 `force-keyframes` 造成樣本轉碼，不能推論正式下載的 codec 或速度。樣本已從 `.live-smoke/mmov-sol-20260907` 刪除且不可復原，目錄無殘留。
+
+MMOV 的完整 66 分鐘與 20 分鐘效能閘門仍為 `not-evaluated`。adapter preflight 不等同於 yt-dlp/FFmpeg 後續連線的完整網路 sandbox，redirect/DNS rebinding 仍列為殘餘 TOCTOU 風險。
 
 ## 既有平台回歸 probe
 

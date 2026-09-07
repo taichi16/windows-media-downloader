@@ -564,6 +564,7 @@ fn sanitize_platform(value: &str) -> (String, Option<Platform>) {
         "little-duck" => ("little-duck".to_string(), Some(Platform::LittleDuck)),
         "olevod" => ("olevod".to_string(), Some(Platform::Olevod)),
         "facebook" => ("facebook".to_string(), Some(Platform::Facebook)),
+        "mmov" => ("mmov".to_string(), Some(Platform::Mmov)),
         _ => ("unknown".to_string(), None),
     }
 }
@@ -697,7 +698,7 @@ pub fn sanitize_source_link(platform: Platform, raw: &str) -> String {
             || format!("https://{host}/watch"),
             |id| format!("https://{host}/watch?v={id}"),
         )
-    } else if platform == Platform::Facebook {
+    } else if matches!(platform, Platform::Facebook | Platform::Mmov) {
         validated.url
     } else {
         let path = if parsed.path().is_empty() {
@@ -878,6 +879,25 @@ mod tests {
                 Platform::Facebook,
                 "https://video.xx.fbcdn.example/secret.m3u8?token=secret",
             ),
+            REDACTED_SOURCE
+        );
+    }
+
+    #[test]
+    fn sanitizer_keeps_only_canonical_mmov_page_url() {
+        assert_eq!(
+            sanitize_source_link(Platform::Mmov, "https://hk.mmov.io/vodplay/123456/1-2.html",),
+            "https://hk.mmov.io/vodplay/123456/1-2.html"
+        );
+        assert_eq!(
+            sanitize_source_link(
+                Platform::Mmov,
+                "https://hk.mmov.io/vodplay/123456/1-2.html#fragment",
+            ),
+            REDACTED_SOURCE
+        );
+        assert_eq!(
+            sanitize_source_link(Platform::Mmov, "https://kkzycdn.com:65/live/master.m3u8",),
             REDACTED_SOURCE
         );
     }

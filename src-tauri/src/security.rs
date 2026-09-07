@@ -20,6 +20,7 @@ pub enum Platform {
     LittleDuck,
     Olevod,
     Facebook,
+    Mmov,
 }
 
 impl Platform {
@@ -30,6 +31,7 @@ impl Platform {
             Self::LittleDuck => "little-duck",
             Self::Olevod => "olevod",
             Self::Facebook => "facebook",
+            Self::Mmov => "mmov",
         }
     }
 
@@ -43,6 +45,7 @@ impl Platform {
             Self::LittleDuck => host == "play.777tv.ai",
             Self::Olevod => matches!(host, "olevod.com" | "www.olevod.com"),
             Self::Facebook => host == "www.facebook.com",
+            Self::Mmov => host == "hk.mmov.io",
         }
     }
 }
@@ -59,6 +62,18 @@ pub fn validate_url_syntax(platform: Platform, raw: &str) -> Result<ValidatedUrl
     let raw = raw.trim();
     if raw.is_empty() || raw.len() > 4096 {
         return Err(AppError::InvalidInput("URL 為空或長度超過限制".to_string()));
+    }
+    if platform == Platform::Mmov
+        && (!raw.is_ascii()
+            || raw
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'\\')
+            || raw.contains('%')
+            || has_mmov_dot_segment(raw))
+    {
+        return Err(AppError::Security(
+            "MMOV URL 含有不允許的 encoding 或 path 字元".to_string(),
+        ));
     }
     if has_explicit_port(raw) {
         return Err(AppError::Security("URL 不得指定連接埠".to_string()));
@@ -94,6 +109,9 @@ pub fn validate_url_syntax(platform: Platform, raw: &str) -> Result<ValidatedUrl
     if platform == Platform::Facebook {
         return normalize_facebook_url(parsed);
     }
+    if platform == Platform::Mmov {
+        return normalize_mmov_url(parsed);
+    }
 
     // Fragments are client-side navigation state and are not sent to the
     // origin server.  Remove them before the URL becomes a job identity so
@@ -109,6 +127,8 @@ pub fn validate_url_syntax(platform: Platform, raw: &str) -> Result<ValidatedUrl
 
 const FACEBOOK_HOST: &str = "www.facebook.com";
 const FACEBOOK_ID_MAX_DIGITS: usize = 32;
+const MMOV_HOST: &str = "hk.mmov.io";
+const MMOV_ID_MAX_DIGITS: usize = 32;
 
 fn normalize_facebook_url(mut parsed: Url) -> Result<ValidatedUrl, AppError> {
     // The approved PCB form carries `pcb.<post-id>` in the path.  Query
@@ -161,6 +181,69 @@ fn is_facebook_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= FACEBOOK_ID_MAX_DIGITS
         && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn normalize_mmov_url(parsed: Url) -> Result<ValidatedUrl, AppError> {
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AppError::Security(
+            "MMOV URL 不得包含 query 或 fragment".to_string(),
+        ));
+    }
+    // Reject encoded separators or encoded control material before
+    // path-segment matching; canonical MMOV identities are plain ASCII IDs.
+    if parsed.as_str().contains('%') {
+        return Err(AppError::Security(
+            "MMOV URL 不接受 percent encoding".to_string(),
+        ));
+    }
+    let segments = parsed
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let Some(work_id) = segments.get(1) else {
+        return Err(AppError::Security(
+            "MMOV URL 路徑不是允許的 VOD 格式".to_string(),
+        ));
+    };
+    let Some(episode_stem) = segments
+        .get(2)
+        .and_then(|value| value.strip_suffix(".html"))
+    else {
+        return Err(AppError::Security(
+            "MMOV URL 路徑不是允許的 VOD 格式".to_string(),
+        ));
+    };
+    let Some((line_id, episode_id)) = episode_stem.split_once('-') else {
+        return Err(AppError::Security("MMOV URL 缺少線路或集數 ID".to_string()));
+    };
+    if segments.len() != 3
+        || segments[0] != "vodplay"
+        || !is_mmov_id(work_id)
+        || !is_mmov_id(line_id)
+        || !is_mmov_id(episode_id)
+    {
+        return Err(AppError::Security(
+            "MMOV URL 路徑不是允許的 VOD 格式".to_string(),
+        ));
+    }
+    Ok(ValidatedUrl {
+        platform: Platform::Mmov,
+        url: format!("https://{MMOV_HOST}/vodplay/{work_id}/{line_id}-{episode_id}.html"),
+        host: MMOV_HOST.to_string(),
+    })
+}
+
+fn is_mmov_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MMOV_ID_MAX_DIGITS
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn has_mmov_dot_segment(raw: &str) -> bool {
+    let path_end = raw.find(['?', '#']).unwrap_or(raw.len());
+    raw[..path_end]
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
 }
 
 /// `url::Url` 會正規化 HTTPS 的顯式預設連接埠 443，故在 parse 前檢查
@@ -323,8 +406,63 @@ mod tests {
         assert!(validate_url_syntax(Platform::Olevod, "https://www.olevod.com/v/1").is_ok());
         assert!(validate_url_syntax(Platform::Olevod, "https://cdn.olevod.com/v/1").is_err());
         assert!(
+            validate_url_syntax(Platform::Mmov, "https://hk.mmov.io/vodplay/123456/1-2.html")
+                .is_ok()
+        );
+        assert!(
             validate_url_syntax(Platform::Youtube, "http://www.youtube.com/watch?v=x").is_err()
         );
+    }
+
+    #[test]
+    fn mmov_normalizes_only_public_vod_paths() {
+        let normalized = validate_url_syntax(
+            Platform::Mmov,
+            "  HTTPS://HK.MMOV.IO/vodplay/123456/01-002.html  ",
+        )
+        .expect("MMOV VOD URL");
+        assert_eq!(normalized.host, "hk.mmov.io");
+        assert_eq!(
+            normalized.url,
+            "https://hk.mmov.io/vodplay/123456/01-002.html"
+        );
+    }
+
+    #[test]
+    fn mmov_rejects_confusion_encoding_and_non_vod_urls() {
+        for url in [
+            "http://hk.mmov.io/vodplay/123/1-2.html",
+            "//hk.mmov.io/vodplay/123/1-2.html",
+            "https://hk.mmov.io:443/vodplay/123/1-2.html",
+            "https://hk.mmov.io:65/vodplay/123/1-2.html",
+            "https://hk.mmov.io./vodplay/123/1-2.html",
+            "https://evil.hk.mmov.io/vodplay/123/1-2.html",
+            "https://mmov.io/vodplay/123/1-2.html",
+            "https://127.0.0.1/vodplay/123/1-2.html",
+            "https://[::1]/vodplay/123/1-2.html",
+            "https://hk.mmov.io/vodplay/123/1-2.html?token=secret",
+            "https://hk.mmov.io/vodplay/123/1-2.html#fragment",
+            "https://hk.mmov.io/vodplay%2F123/1-2.html",
+            "https://%68k.mmov.io/vodplay/123/1-2.html",
+            "https://hk.mmov.io/vodplay/123%2F456/1-2.html",
+            "https://hk.mmov.io/vodplay/123/./1-2.html",
+            "https://hk.mmov.io/vodplay/123/../1-2.html",
+            "https://hk.mmov.io/vodplay/123/1-2.html\\suffix",
+            "https://hk.mmov.io/vodplay/123/1-２.html",
+            "https://hk.mmov.io/vodplay/123/1-2.HTML",
+            "https://hk.mmov.io/vodplay/123/1-2.html/extra",
+            "https://hk.mmov.io/vodplay/not-numeric/1-2.html",
+            "https://hk.mmov.io/vodplay/123/not-numeric-2.html",
+            "https://hk.mmov.io/vodplay/123/1-2-3.html",
+            "https://hk.mmov.io/watch/123",
+            "https://hk.mmov.io/vodplay/123/1-2.html/",
+            "https://hk.mmov.io/vodplay/123456789012345678901234567890123/1-2.html",
+        ] {
+            assert!(
+                validate_url_syntax(Platform::Mmov, url).is_err(),
+                "must reject {url}"
+            );
+        }
     }
 
     #[test]

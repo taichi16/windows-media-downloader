@@ -21,7 +21,7 @@ const checks = [
   [main.includes('id="output-path"') && main.includes('title="${escapeAttribute(visibleOutputPath)}"') && main.includes('aria-label="完成檔目錄：${escapeAttribute(visibleOutputPath)}"') && styles.includes("text-overflow: ellipsis"), "輸出路徑有 ellipsis 與完整可存取值"],
   [styles.includes("input, select { min-height: 44px; font-size: 16px; }"), "輸入與選單維持 16px 字級及 44px 觸控高度"],
   [styles.includes(".compact { min-height: 44px; }"), "hero/About compact 按鈕維持 44px 觸控高度"],
-  [main.includes('"facebook"') && main.includes('facebook: "Facebook（條件式）"') && main.includes('"facebook"] as Platform[]'), "平台選單包含 Facebook（條件式）"],
+  [main.includes('"facebook"') && main.includes('facebook: "Facebook（條件式）"') && main.includes('"facebook", "mmov"] as Platform[]') && main.includes('mmov: "MMOV（實驗性／條件式）"'), "平台選單包含 Facebook 與 MMOV"],
   [main.includes('data-cancel="${escapeAttribute(job.id)}"') && main.includes('data-remove-finished="${escapeAttribute(job.id)}"'), "active/terminal 工作操作仍由 data 屬性委派"],
   [main.includes('class="job-card ${active ? "job-active" : "job-terminal"}"'), "工作卡區分 active 與 compact terminal"],
   [main.includes("function renderTerminalTiming(jobId: string)") && main.includes("item.job_id === jobId") && main.includes("formatTimestamp(record.finished_at_ms)") && main.includes("時間紀錄同步中"), "terminal 卡片使用歷史時間且缺資料時不杜撰"],

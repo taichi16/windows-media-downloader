@@ -34,14 +34,18 @@ const HLS_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const HLS_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_URI_LENGTH: usize = 4096;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+const MMOV_QUERY_FRAGMENT_ERROR: &str = "MMOV HLS URL 不得包含 query 或 fragment";
 pub(crate) const PLATFORM_USER_AGENT: &str = "WindowsMediaDownloader/0.1";
 
 const LITTLE_DUCK_MARKER: &str = "var player_data";
 const OLEVOD_MARKER: &str = "var player_aaaa";
 const MMOV_MEDIA_HOST_BFIKUN: &str = "bfikuncdn.com";
 const MMOV_MEDIA_HOST_KKZY: &str = "kkzycdn.com";
+const MMOV_MEDIA_HOST_BDZY: &str = "b3.bdzybf22.com";
+const MMOV_SEGMENT_HOST_BDZY: &str = "tsb3.bdzybf22.com";
 const MMOV_MEDIA_PORT_BFIKUN: u16 = 443;
 const MMOV_MEDIA_PORT_KKZY: u16 = 65;
+const MMOV_MEDIA_PORT_BDZY: u16 = 443;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedTarget {
@@ -95,19 +99,35 @@ pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<Resolved
             })
         }
         Platform::Mmov => {
-            let source_url = Url::parse(&source.url)?;
-            let client = build_client()?;
-            let body = bounded_get(&client, &source_url, HTML_MAX_BYTES).await?;
-            let html = std::str::from_utf8(&body)
-                .map_err(|_| AppError::Security("MMOV 頁面不是 UTF-8 HTML".to_string()))?;
-            let target = parse_mmov_video_src(html.as_bytes())?;
-            inspect_hls(&client, Platform::Mmov, target.clone()).await?;
-            Ok(ResolvedTarget {
-                platform: Platform::Mmov,
-                url: target.to_string(),
-            })
+            for attempt in 0..2 {
+                match resolve_mmov_target_once(&source.url).await {
+                    Err(error) if attempt == 0 && is_mmov_query_fragment_error(&error) => {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    result => return result,
+                }
+            }
+            unreachable!("MMOV resolver loop always returns on its second attempt")
         }
     }
+}
+
+async fn resolve_mmov_target_once(source: &str) -> Result<ResolvedTarget, AppError> {
+    let source_url = Url::parse(source)?;
+    let client = build_client()?;
+    let body = bounded_get(&client, &source_url, HTML_MAX_BYTES).await?;
+    let html = std::str::from_utf8(&body)
+        .map_err(|_| AppError::Security("MMOV 頁面不是 UTF-8 HTML".to_string()))?;
+    let target = parse_mmov_video_src(html.as_bytes())?;
+    inspect_hls(&client, Platform::Mmov, target.clone()).await?;
+    Ok(ResolvedTarget {
+        platform: Platform::Mmov,
+        url: target.to_string(),
+    })
+}
+
+fn is_mmov_query_fragment_error(error: &AppError) -> bool {
+    matches!(error, AppError::Security(message) if message.starts_with(MMOV_QUERY_FRAGMENT_ERROR))
 }
 
 fn build_client() -> Result<Client, AppError> {
@@ -420,7 +440,13 @@ fn validate_mmov_media_url(raw: &str) -> Result<Url, AppError> {
     }
     let url = Url::parse(raw)
         .map_err(|error| AppError::Security(format!("MMOV videoSrc URL 無法解析：{error}")))?;
-    validate_hls_url(Platform::Mmov, &url, true)
+    let url = validate_hls_url(Platform::Mmov, &url, true)?;
+    if url.host_str() == Some(MMOV_SEGMENT_HOST_BDZY) {
+        return Err(AppError::Security(
+            "MMOV videoSrc 不得直接使用 segment-only host".to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 fn validate_mmov_media_endpoint(url: &Url, host: &str) -> Result<(), AppError> {
@@ -435,9 +461,11 @@ fn validate_mmov_media_endpoint(url: &Url, host: &str) -> Result<(), AppError> {
         ));
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(AppError::Security(
-            "MMOV HLS URL 不得包含 query 或 fragment".to_string(),
-        ));
+        return Err(AppError::Security(format!(
+            "{MMOV_QUERY_FRAGMENT_ERROR}（host={host}、query={}、fragment={}）",
+            url.query().is_some(),
+            url.fragment().is_some()
+        )));
     }
     let port = url
         .port_or_known_default()
@@ -446,6 +474,8 @@ fn validate_mmov_media_endpoint(url: &Url, host: &str) -> Result<(), AppError> {
         (host, port),
         (MMOV_MEDIA_HOST_BFIKUN, MMOV_MEDIA_PORT_BFIKUN)
             | (MMOV_MEDIA_HOST_KKZY, MMOV_MEDIA_PORT_KKZY)
+            | (MMOV_MEDIA_HOST_BDZY, MMOV_MEDIA_PORT_BDZY)
+            | (MMOV_SEGMENT_HOST_BDZY, MMOV_MEDIA_PORT_BDZY)
     );
     if !allowed {
         return Err(AppError::Security(
@@ -851,6 +881,7 @@ mod tests {
             "https://bfikuncdn.com/live/master.m3u8",
             "https://bfikuncdn.com:443/live/master.m3u8",
             "https://kkzycdn.com:65/live/master.m3u8",
+            "https://b3.bdzybf22.com/videos/example/index.m3u8",
         ] {
             assert!(validate_mmov_media_url(url).is_ok(), "must allow {url}");
         }
@@ -858,6 +889,9 @@ mod tests {
             "https://bfikuncdn.com:65/live/master.m3u8",
             "https://kkzycdn.com/live/master.m3u8",
             "https://kkzycdn.com:443/live/master.m3u8",
+            "https://tsb3.bdzybf22.com/videos/example/index.m3u8",
+            "https://b3.bdzybf22.com:444/videos/example/index.m3u8",
+            "https://evil.b3.bdzybf22.com/videos/example/index.m3u8",
             "https://evil.example:65/live/master.m3u8",
             "https://[::1]:65/live/master.m3u8",
             "https://kkzycdn.com:65/live/master.m3u8?token=x",
@@ -866,6 +900,45 @@ mod tests {
             "http://kkzycdn.com:65/live/master.m3u8",
         ] {
             assert!(validate_mmov_media_url(url).is_err(), "must reject {url}");
+        }
+    }
+
+    #[test]
+    fn mmov_retry_classifier_only_accepts_query_fragment_shape_errors() {
+        assert!(is_mmov_query_fragment_error(&AppError::Security(format!(
+            "{MMOV_QUERY_FRAGMENT_ERROR}（host=example、query=true、fragment=false）"
+        ))));
+        for error in [
+            AppError::Security("MMOV HLS endpoint 不符合固定 host/port allowlist".to_string()),
+            AppError::Security("平台回應不是 2xx：403 Forbidden".to_string()),
+            AppError::Process(MMOV_QUERY_FRAGMENT_ERROR.to_string()),
+        ] {
+            assert!(!is_mmov_query_fragment_error(&error));
+        }
+    }
+
+    #[test]
+    fn mmov_bdzy_manifest_allows_only_the_exact_segment_host() {
+        let base =
+            Url::parse("https://b3.bdzybf22.com/videos/example/index.m3u8").expect("BDZY base");
+        let mut scan = HlsScan::default();
+        let accepted = parse_hls_manifest(
+            Platform::Mmov,
+            &base,
+            b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:2,\nhttps://tsb3.bdzybf22.com/videos/example/index0.jpeg\n#EXT-X-ENDLIST\n",
+            &mut scan,
+        );
+        assert!(accepted.is_ok());
+
+        for host in ["b4.bdzybf22.com", "evil.tsb3.bdzybf22.com"] {
+            let body = format!(
+                "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:2,\nhttps://{host}/videos/example/index0.jpeg\n#EXT-X-ENDLIST\n"
+            );
+            let mut scan = HlsScan::default();
+            assert!(
+                parse_hls_manifest(Platform::Mmov, &base, body.as_bytes(), &mut scan).is_err(),
+                "must reject {host}"
+            );
         }
     }
 

@@ -1,11 +1,11 @@
-# 平台能力矩陣（Windows MVP）
+# 平台能力矩陣（Windows Portable 1.0）
 
-| 平台 | hostname 規則 | URL 結構驗證 | live smoke | MVP 狀態 |
+| 平台 | hostname 規則 | URL 結構驗證 | live smoke | 1.0 狀態 |
 | --- | --- | --- | --- | --- |
 | YouTube | `youtube.com`、`www.youtube.com`、`m.youtube.com`、`youtu.be` | HTTPS、DNS、無 playlist | 2026-09-07：公開 19 秒影片 probe 通過；未下載 | 基本流程可用；完整格式仍待 EJS／受信任 JavaScript runtime 納入並鎖定 |
 | YouTube Music | `music.youtube.com`、`www.music.youtube.com` | HTTPS、DNS、無 playlist | 2026-09-07：同一公開 ID 經 Music host probe 通過；未下載 | 基本流程可用；完整格式仍待 EJS／受信任 JavaScript runtime 納入並鎖定 |
 | Facebook | 僅 `www.facebook.com` | HTTPS、DNS、無 playlist、公開匿名 reel 或 page/video 純數字 ID 路徑；PCB 為 path segment，任何 query 均拒絕 | 2026-09-07：兩個使用者明確授權的公開 URL（reel 與 PCB page/video 各一）probe 與約 3 秒 video smoke 通過 | 僅對上述兩個授權 URL 條件式通過；不宣稱整站或未來可用，改版、受限內容或 extractor 非 `facebook` 會 fail closed |
-| MMOV（實驗性／條件式） | 僅 `hk.mmov.io` page；媒體僅 `bfikuncdn.com:443`、`kkzycdn.com:65` | HTTPS 精確 VOD path、唯一 `videoSrc`、native TLS no-redirect、公開 DNS/peer、HLS 3 層／5,000 URI、VOD ENDLIST、clear-key only | 2026-09-07：一個使用者授權公開來源；Rust opt-in adapter 1 passed，總 7.71 秒；probe 與約 3 秒 video smoke 通過 | 僅對該指定頁面條件式通過；不宣稱整站或未來可用，完整 20 分鐘與 66 分鐘效能閘門均 `not-evaluated` |
+| MMOV（實驗性／條件式） | 僅 `hk.mmov.io` page；媒體僅固定 host/port 組合，含 BDZY 的 manifest／segment 分工 | HTTPS 精確 VOD path、唯一 `videoSrc`、native TLS no-redirect、公開 DNS/peer、HLS 3 層／5,000 URI、VOD ENDLIST、clear-key only | 2026-09-07：兩個使用者授權公開來源；第二個來源 adapter/probe 與約 2 秒原生 HLS smoke 通過 | 僅對已測頁面條件式通過；不宣稱整站或未來可用，完整 20 分鐘與 134.5 分鐘效能閘門均 `not-evaluated` |
 | 小鴨影音 | 頁面僅 `play.777tv.ai`；媒體僅 `v2.ppqrrs.com`、`v2.adfg8.vip` | HTTPS、公開 DNS/peer、固定 player JSON、旗標皆 0、無 key、VOD ENDLIST | 2026-09-07：指定 URL adapter/probe 通過；3.019 秒 MP3 樣本通過 ffprobe | 條件式可用；只驗證指定頁面與當時站台格式，改版後可 fail closed |
 | 歐樂影院 | 頁面僅 `olevod.com`、`www.olevod.com`；媒體僅 `europe.olemovienews.com` | HTTPS、公開 DNS/peer、固定 player JSON、旗標皆 0、無 key、VOD ENDLIST | 2026-09-07：指定 URL adapter/probe 通過；3.040 秒 H.264/AAC MP4 樣本通過 ffprobe | 條件式可用；只驗證指定頁面與當時站台格式，改版後可 fail closed |
 

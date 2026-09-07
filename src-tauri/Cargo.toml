@@ -1,6 +1,6 @@
 [package]
 name = "windows-media-downloader"
-version = "0.1.0"
+version = "1.0.0"
 description = "安全、可攜的 Windows 影音下載工具"
 authors = ["Y.J. Wang"]
 edition = "2021"

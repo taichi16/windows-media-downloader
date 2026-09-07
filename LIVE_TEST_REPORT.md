@@ -88,6 +88,16 @@ MMOV 的完整 66 分鐘與 20 分鐘效能閘門仍為 `not-evaluated`。adapte
 
 2026-09-07 重新檢查使用者回報的來源時，MMOV HTML 頁面可匿名取得並解析出 allowlist 內的 HLS URL，但媒體端點 `bfikuncdn.com` 對固定應用程式 User-Agent、一般瀏覽器 User-Agent、Referer 與 Origin 組合均回傳 nginx `403 Forbidden`。因此此來源在當時環境不可下載；程式維持 fail closed，不嘗試 Cookie、登入、代理、地區規避或存取控制繞過。錯誤訊息已改為顯示實際拒絕請求的 HTTPS host，避免誤判為來源頁面本身被拒絕。
 
+### 來源 `510813/5-1` 的條件式驗證
+
+2026-09-07 檢查此使用者指定來源時，頁面解析出 `b3.bdzybf22.com:443` manifest；其 4,036 個 segment URI 全部落在 `tsb3.bdzybf22.com:443`。兩個 host 的 DNS 均只回傳本次觀測到的公開 IPv4，manifest 約 435 KiB、標記 VOD 與 ENDLIST、未含 KEY，URI 數低於 5,000 上限。程式僅加入這兩個 exact host/port，並把 `tsb3` 限定為 manifest 內的 segment-only host，不允許萬用 `*.bdzybf22.com`。
+
+不下載 probe 結束碼 0、3.444 秒，extractor=`generic`、protocol=`m3u8_native`、duration=8,070 秒、DRM metadata=`false`。yt-dlp 原生 HLS `--test` smoke 結束碼 0、4.915 秒，取得首段 341,036 bytes MP4；FFprobe 為 2.023 秒、1920x816 H.264 + AAC 44.1kHz stereo。segment URL 使用 `.jpeg` 副檔名，FFmpeg 精確切段會依其安全副檔名規則拒絕，但正式下載使用的 yt-dlp 原生 HLS 路徑可正常處理；未關閉 FFmpeg 安全檢查。樣本 SHA-256 為 `663f88...ad5672`，驗證後已移至 Windows 資源回收筒。完整 134.5 分鐘下載與 20 分鐘效能閘門仍為 `not-evaluated`。
+
+### 來源 `512338/4-1` 的動態 URI 行為
+
+2026-09-07 使用者回報一次 `MMOV HLS URL 不得包含 query 或 fragment`；隨後直接檢查頁面、master、child manifest 與 1,387 個 segment URI，均未含 query／fragment，四個 KEY 全為 `METHOD=NONE`。同一 Rust adapter 第一次重現失敗，之後連續五次 MMOV 解析通過，顯示站台回應具有短暫動態差異。程式沒有放寬 query 規則；只在此特定錯誤時等待 300 ms 並從來源頁重新執行一次完整安全解析，第二次不合規即拒絕。重試不保存或傳遞任何 query/token，也不套用於 403、host allowlist 或其他安全錯誤。
+
 ## 既有平台回歸 probe
 
 另以一個公開、19 秒的 YouTube ID 分別經 `www.youtube.com` 與 `music.youtube.com` 執行相同的不下載 probe；兩者結束碼皆為 0、extractor=`youtube`、availability=`public`。沒有下載該內容。因 portable 尚未攜帶 yt-dlp EJS 與受信任 JavaScript runtime，這只驗證基本路徑，不能宣稱所有 YouTube 格式完整可用。

@@ -220,7 +220,7 @@ function render(): void {
         <div class="brand-lockup">
           <img class="brand-mark" src="/logo.svg" width="48" height="48" alt="" aria-hidden="true" />
           <div>
-          <p class="eyebrow">WINDOWS 11 · PORTABLE MVP</p>
+          <p class="eyebrow">WINDOWS 11 · PORTABLE 1.0</p>
           <h1>Windows 影音下載工具</h1>
           <p class="subtitle">固定平台允許清單、HTTPS 與啟動前 DNS 安全驗證。</p>
           </div>

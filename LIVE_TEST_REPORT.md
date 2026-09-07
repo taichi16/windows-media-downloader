@@ -1,7 +1,7 @@
 # 指定平台 Live 驗收報告
 
 日期：2026-09-07（Asia/Taipei）  
-範圍：使用者指定的小鴨影音與歐樂影院各一個公開頁面。完整 URL 不寫入應用程式 log；本報告只記錄平台、媒體 host 與必要技術結果。
+範圍：使用者指定的小鴨影音、歐樂影院與 Facebook 公開來源之條件式驗證。完整 URL 不寫入應用程式 log；本報告只記錄平台、媒體 host 與必要技術結果。
 
 ## 安全閘門
 
@@ -42,6 +42,29 @@
 程式對兩個直接 HLS 平台固定 4 個 concurrent fragments，全域最多同時 3 筆；影片維持 copy/remux，避免不必要重編碼。這是效能保護措施，不會規避站台限速。完整方法與本機 fixture 結果見 `PERFORMANCE.md`。
 
 本報告只驗證指定 URL 在上述日期與環境的行為。站台改版、媒體 host 變更、憑證、下架或加入保護後，程式會 fail closed；不能據此宣稱所有節目、所有 URL 或未來狀態皆支援。
+
+## Facebook（條件式驗證）
+
+2026-09-07 由 Sol 以兩個使用者明確授權的公開 URL 執行安全 probe 與各約 3 秒的 video smoke。以下僅記錄去敏後的必要結果；不記錄完整 URL、title、fbcdn 位址或執行期 token，也不由測試結果判定著作權。
+
+### 安全 probe
+
+- 使用鎖定的 yt-dlp；本次執行檔 SHA-256 以 `666749...e7a` 表示（僅保留去敏前綴／尾碼）。
+- 兩個來源均採匿名、無 Cookie、無登入、無 bypass；reel 公開影片 ID `1584857163015601` 結束碼 0、3.222 秒、duration 14.997 秒、extractor=`facebook`。
+- PCB page/video 公開影片 ID `2093187601588241` 原始 path 結束碼 0、1.910 秒、duration 42 秒；canonical 相同影片 ID 結束碼 0、2.242 秒。
+- 兩個來源的 `availability`、`is_live`、`live_status`、playlist 欄位均為 null／無 marker；DRM metadata 未出現已知 marker，不將此寫成明確 false。
+- 這些結果是匿名解析與公開可存取的實證，不代表整站、未來版本或著作權授權；站台變更或受限內容仍會依安全閘門拒絕。
+
+### 最小 video smoke
+
+每筆下載前均先通過相同安全 probe，僅取樣約 3 秒；樣本驗證後已永久清除，忽略測試目錄為空，沒有保存或散布內容。
+
+| 來源形態 | yt-dlp 結束碼 | 下載時間 | 輸出 | FFprobe | 估算速率 | 取樣 SHA-256 |
+| --- | ---: | ---: | --- | --- | ---: | --- |
+| reel 公開影片 ID `1584857163015601` | 0 | 4.022 秒 | 823,117 bytes MP4 | 3.009 秒；AV1 + AAC | 約 204,659 B/s | `12c521...f48d0` |
+| PCB canonical 公開影片 ID `2093187601588241` | 0 | 2.172 秒 | 1,241,749 bytes MP4 | 3.083 秒；H.264 video-only | 約 571,708 B/s | `ab4316...07d6` |
+
+約 3 秒 smoke 不能代表整片下載；20 分鐘完整基準閘門仍為 `not-evaluated`。第二個樣本本身未含可辨識音訊串流，不代表 audio 模式失效，但表示該來源可能沒有音訊。Facebook 不接受 fbcdn URL、Cookie、token、登入、直播或存取控制繞過。
 
 ## 既有平台回歸 probe
 

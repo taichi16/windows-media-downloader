@@ -19,6 +19,7 @@ pub enum Platform {
     YoutubeMusic,
     LittleDuck,
     Olevod,
+    Facebook,
 }
 
 impl Platform {
@@ -28,6 +29,7 @@ impl Platform {
             Self::YoutubeMusic => "youtube-music",
             Self::LittleDuck => "little-duck",
             Self::Olevod => "olevod",
+            Self::Facebook => "facebook",
         }
     }
 
@@ -40,6 +42,7 @@ impl Platform {
             Self::YoutubeMusic => matches!(host, "music.youtube.com" | "www.music.youtube.com"),
             Self::LittleDuck => host == "play.777tv.ai",
             Self::Olevod => matches!(host, "olevod.com" | "www.olevod.com"),
+            Self::Facebook => host == "www.facebook.com",
         }
     }
 }
@@ -88,6 +91,10 @@ pub fn validate_url_syntax(platform: Platform, raw: &str) -> Result<ValidatedUrl
         )));
     }
 
+    if platform == Platform::Facebook {
+        return normalize_facebook_url(parsed);
+    }
+
     // Fragments are client-side navigation state and are not sent to the
     // origin server.  Remove them before the URL becomes a job identity so
     // equivalent resources cannot bypass active-job deduplication.
@@ -98,6 +105,62 @@ pub fn validate_url_syntax(platform: Platform, raw: &str) -> Result<ValidatedUrl
         url: parsed.to_string(),
         host,
     })
+}
+
+const FACEBOOK_HOST: &str = "www.facebook.com";
+const FACEBOOK_ID_MAX_DIGITS: usize = 32;
+
+fn normalize_facebook_url(mut parsed: Url) -> Result<ValidatedUrl, AppError> {
+    // The approved PCB form carries `pcb.<post-id>` in the path.  Query
+    // parameters can contain tracking, signed or access-control material,
+    // so Facebook sources are deliberately query-free rather than attempting
+    // to maintain a query allowlist.
+    if parsed.query().is_some() {
+        return Err(AppError::Security(
+            "Facebook URL 不得包含 query 參數".to_string(),
+        ));
+    }
+
+    let segments = parsed
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let canonical_path =
+        if segments.len() == 2 && segments[0] == "reel" && is_facebook_id(segments[1]) {
+            format!("/reel/{}", segments[1])
+        } else if segments.len() == 3
+            && is_facebook_id(segments[0])
+            && segments[1] == "videos"
+            && is_facebook_id(segments[2])
+        {
+            format!("/{}/videos/{}", segments[0], segments[2])
+        } else if segments.len() == 4
+            && is_facebook_id(segments[0])
+            && segments[1] == "videos"
+            && segments[2].strip_prefix("pcb.").is_some_and(is_facebook_id)
+            && is_facebook_id(segments[3])
+        {
+            format!("/{}/videos/{}", segments[0], segments[3])
+        } else {
+            return Err(AppError::Security(
+                "Facebook URL 路徑不是允許的公開影片格式".to_string(),
+            ));
+        };
+
+    parsed.set_path(&canonical_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(ValidatedUrl {
+        platform: Platform::Facebook,
+        url: parsed.to_string(),
+        host: FACEBOOK_HOST.to_string(),
+    })
+}
+
+fn is_facebook_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= FACEBOOK_ID_MAX_DIGITS
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// `url::Url` 會正規化 HTTPS 的顯式預設連接埠 443，故在 parse 前檢查
@@ -262,6 +325,64 @@ mod tests {
         assert!(
             validate_url_syntax(Platform::Youtube, "http://www.youtube.com/watch?v=x").is_err()
         );
+    }
+
+    #[test]
+    fn facebook_accepts_public_numeric_shapes_and_drops_fragment() {
+        let reel = validate_url_syntax(
+            Platform::Facebook,
+            " HTTPS://WWW.FACEBOOK.COM/reel/1584857163015601#client-only ",
+        )
+        .expect("Facebook reel URL");
+        assert_eq!(reel.host, "www.facebook.com");
+        assert_eq!(reel.url, "https://www.facebook.com/reel/1584857163015601");
+
+        let pcb = validate_url_syntax(
+            Platform::Facebook,
+            "https://www.facebook.com/100064322940906/videos/pcb.1529534909200593/2093187601588241",
+        )
+        .expect("Facebook pcb URL");
+        assert_eq!(
+            pcb.url,
+            "https://www.facebook.com/100064322940906/videos/2093187601588241"
+        );
+
+        let canonical = validate_url_syntax(Platform::Facebook, &pcb.url).expect("canonical URL");
+        assert_eq!(canonical.url, pcb.url);
+    }
+
+    #[test]
+    fn facebook_rejects_non_public_shapes_and_unknown_or_sensitive_queries() {
+        for url in [
+            "http://www.facebook.com/reel/123",
+            "https://facebook.com/reel/123",
+            "https://www.facebook.com.evil.example/reel/123",
+            "https://user:pass@www.facebook.com/reel/123",
+            "https://www.facebook.com:443/reel/123",
+            "https://www.facebook.com/groups/123",
+            "https://www.facebook.com/private/123",
+            "https://www.facebook.com/live/123",
+            "https://www.facebook.com/watch/?v=123",
+            "https://www.facebook.com/profile.php?id=123",
+            "https://www.facebook.com/reel/not-numeric",
+            "https://www.facebook.com/reel/123/extra",
+            "https://www.facebook.com/123/videos/not-a-video",
+            "https://www.facebook.com/123/videos/pcb.not-numeric/456",
+            "https://www.facebook.com/123/videos/pcb.456/789/extra",
+            "https://www.facebook.com/reel/123?foo=bar",
+            "https://www.facebook.com/reel/123?pcb=safe&foo=bar",
+            "https://www.facebook.com/reel/123?pcb=one&pcb=two",
+            "https://www.facebook.com/reel/123?pcb=%2Funsafe",
+            "https://www.facebook.com/reel/123456789012345678901234567890123",
+            "https://www.facebook.com/reel/123?pcb=feed",
+            "https://www.facebook.com/reel/123?utm_source=share",
+            "https://www.facebook.com/reel/123?access_token=secret",
+        ] {
+            assert!(
+                validate_url_syntax(Platform::Facebook, url).is_err(),
+                "must reject {url}"
+            );
+        }
     }
 
     #[test]

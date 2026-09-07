@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 
-type Platform = "youtube" | "youtube-music" | "little-duck" | "olevod";
+type Platform = "youtube" | "youtube-music" | "little-duck" | "olevod" | "facebook";
 type Mode = "audio" | "video";
 type JobState = "queued" | "running" | "completed" | "failed" | "cancelled";
 
@@ -130,6 +130,7 @@ function platformName(platform: string): string {
     "youtube-music": "YouTube Music",
     "little-duck": "小鴨影音（條件式）",
     olevod: "歐樂影院（條件式）",
+    facebook: "Facebook（條件式）",
   } as Record<string, string>)[platform] ?? "未知平台";
 }
 
@@ -363,7 +364,7 @@ function renderRows(): void {
       <div class="download-row" data-index="${index}">
         <label>平台
           <select data-field="platform" aria-label="第 ${index + 1} 筆平台" ${busy ? "disabled" : ""}>
-            ${(["youtube", "youtube-music", "little-duck", "olevod"] as Platform[])
+            ${(["youtube", "youtube-music", "little-duck", "olevod", "facebook"] as Platform[])
               .map((platform) => `<option value="${platform}" ${platform === row.platform ? "selected" : ""}>${platformName(platform)}</option>`)
               .join("")}
           </select>

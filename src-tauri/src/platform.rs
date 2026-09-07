@@ -54,12 +54,12 @@ impl ResolvedTarget {
 
 /// 將前端提供的來源 URL 解析成 manager 唯一可使用的 verified target。
 ///
-/// YouTube 目前仍把已正規化的來源 URL 交給 yt-dlp；兩個新增平台則先
-/// 讀取公開頁面並把播放 URL 及其 HLS manifest 驗證完畢。
+/// YouTube、YouTube Music 與 Facebook 把已正規化的來源 URL 交給 yt-dlp；
+/// 兩個直接 HLS 平台則先讀取公開頁面並把播放 URL 及其 HLS manifest 驗證完畢。
 pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<ResolvedTarget, AppError> {
     let source = validate_url_with_dns(request.platform, &request.url)?;
     match request.platform {
-        Platform::Youtube | Platform::YoutubeMusic => Ok(ResolvedTarget {
+        Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => Ok(ResolvedTarget {
             platform: source.platform,
             url: source.url,
         }),
@@ -72,7 +72,7 @@ pub(crate) async fn resolve_target(request: &DownloadRequest) -> Result<Resolved
             let marker = match request.platform {
                 Platform::LittleDuck => LITTLE_DUCK_MARKER,
                 Platform::Olevod => OLEVOD_MARKER,
-                Platform::Youtube | Platform::YoutubeMusic => unreachable!(),
+                Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => unreachable!(),
             };
             let player = parse_player_object(html.as_bytes(), marker)?;
             let target = parse_player_target(request.platform, &player)?;
@@ -262,7 +262,7 @@ fn media_host_allowed(platform: Platform, host: &str) -> bool {
     match platform {
         Platform::LittleDuck => matches!(host, "v2.ppqrrs.com" | "v2.adfg8.vip"),
         Platform::Olevod => host == "europe.olemovienews.com",
-        Platform::Youtube | Platform::YoutubeMusic => false,
+        Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => false,
     }
 }
 
@@ -453,7 +453,7 @@ mod tests {
         match platform {
             Platform::LittleDuck => "https://v2.adfg8.vip/live/master.m3u8",
             Platform::Olevod => "https://europe.olemovienews.com/live/master.m3u8",
-            Platform::Youtube | Platform::YoutubeMusic => unreachable!(),
+            Platform::Youtube | Platform::YoutubeMusic | Platform::Facebook => unreachable!(),
         }
     }
 

@@ -563,6 +563,7 @@ fn sanitize_platform(value: &str) -> (String, Option<Platform>) {
         "youtube-music" => ("youtube-music".to_string(), Some(Platform::YoutubeMusic)),
         "little-duck" => ("little-duck".to_string(), Some(Platform::LittleDuck)),
         "olevod" => ("olevod".to_string(), Some(Platform::Olevod)),
+        "facebook" => ("facebook".to_string(), Some(Platform::Facebook)),
         _ => ("unknown".to_string(), None),
     }
 }
@@ -696,6 +697,8 @@ pub fn sanitize_source_link(platform: Platform, raw: &str) -> String {
             || format!("https://{host}/watch"),
             |id| format!("https://{host}/watch?v={id}"),
         )
+    } else if platform == Platform::Facebook {
+        validated.url
     } else {
         let path = if parsed.path().is_empty() {
             "/"
@@ -858,6 +861,24 @@ mod tests {
                 "https://www.olevod.com/v/episode?token=secret#frag"
             ),
             "https://www.olevod.com/v/episode"
+        );
+    }
+
+    #[test]
+    fn sanitizer_keeps_only_facebook_public_ids() {
+        assert_eq!(
+            sanitize_source_link(
+                Platform::Facebook,
+                "https://www.facebook.com/100064322940906/videos/pcb.1529534909200593/2093187601588241#fragment",
+            ),
+            "https://www.facebook.com/100064322940906/videos/2093187601588241"
+        );
+        assert_eq!(
+            sanitize_source_link(
+                Platform::Facebook,
+                "https://video.xx.fbcdn.example/secret.m3u8?token=secret",
+            ),
+            REDACTED_SOURCE
         );
     }
 

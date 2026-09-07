@@ -64,9 +64,13 @@ pub struct ProbeData {
     pub webpage_url: Option<String>,
     pub availability: Option<String>,
     pub has_drm: Option<bool>,
+    pub is_live: Option<bool>,
+    pub live_status: Option<String>,
+    pub playlist_id: Option<String>,
+    pub playlist_count: Option<u64>,
 }
 
-const PROBE_PRINT_TEMPLATE: &str = r#"{"title":%(title|null)j,"duration":%(duration|null)j,"extractor":%(extractor|null)j,"webpage_url":%(webpage_url|null)j,"availability":%(availability|null)j,"has_drm":%(formats.:.{has_drm}|[])j}"#;
+const PROBE_PRINT_TEMPLATE: &str = r#"{"title":%(title|null)j,"duration":%(duration|null)j,"extractor":%(extractor|null)j,"webpage_url":%(webpage_url|null)j,"availability":%(availability|null)j,"has_drm":%(formats.:.{has_drm}|[])j,"is_live":%(is_live|null)j,"live_status":%(live_status|null)j,"playlist_id":%(playlist_id|null)j,"playlist_count":%(playlist_count|null)j}"#;
 
 struct ManagerInner {
     jobs: Mutex<BTreeMap<String, DownloadStatus>>,
@@ -396,7 +400,9 @@ impl DownloadManager {
                 tail(&stderr, 2000)
             )));
         }
-        parse_probe_metadata(&stdout)
+        let metadata = parse_probe_metadata(&stdout)?;
+        validate_probe_platform(request.platform, &metadata)?;
+        Ok(metadata)
     }
 
     fn remove_process_id(&self, job_id: Option<&str>) {
@@ -1043,6 +1049,10 @@ pub fn parse_probe_metadata(stdout: &str) -> Result<ProbeData, AppError> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let has_drm = json.get("has_drm").and_then(normalize_drm_marker);
+    let is_live = optional_probe_bool(&json, "is_live")?;
+    let live_status = optional_probe_string(&json, "live_status")?;
+    let playlist_id = optional_probe_string(&json, "playlist_id")?;
+    let playlist_count = optional_probe_count(&json, "playlist_count")?;
     if has_drm == Some(true) {
         return Err(AppError::Security("內容標記為 DRM，拒絕下載".to_string()));
     }
@@ -1053,6 +1063,24 @@ pub fn parse_probe_metadata(stdout: &str) -> Result<ProbeData, AppError> {
                 "內容不是明確 public/unlisted，可能需要登入、付費或不可用，拒絕下載".to_string(),
             ));
         }
+    }
+    if is_live == Some(true) {
+        return Err(AppError::Security(
+            "內容標記為直播或直播事件，拒絕下載".to_string(),
+        ));
+    }
+    if live_status
+        .as_deref()
+        .is_some_and(|status| status != "not_live")
+    {
+        return Err(AppError::Security(
+            "內容不是明確 not_live 狀態，拒絕下載".to_string(),
+        ));
+    }
+    if playlist_id.is_some() || playlist_count.is_some_and(|count| count > 1) {
+        return Err(AppError::Security(
+            "內容標記為播放清單，拒絕下載".to_string(),
+        ));
     }
     Ok(ProbeData {
         title: json
@@ -1070,7 +1098,58 @@ pub fn parse_probe_metadata(stdout: &str) -> Result<ProbeData, AppError> {
             .map(str::to_owned),
         availability,
         has_drm,
+        is_live,
+        live_status,
+        playlist_id,
+        playlist_count,
     })
+}
+
+fn optional_probe_bool(json: &serde_json::Value, field: &str) -> Result<Option<bool>, AppError> {
+    match json.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(AppError::Process(format!("probe {field} 欄位格式無效"))),
+    }
+}
+
+fn optional_probe_string(
+    json: &serde_json::Value,
+    field: &str,
+) -> Result<Option<String>, AppError> {
+    match json.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(AppError::Process(format!("probe {field} 欄位格式無效"))),
+    }
+}
+
+fn optional_probe_count(json: &serde_json::Value, field: &str) -> Result<Option<u64>, AppError> {
+    match json.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| AppError::Process(format!("probe {field} 欄位格式無效"))),
+        Some(_) => Err(AppError::Process(format!("probe {field} 欄位格式無效"))),
+    }
+}
+
+fn validate_probe_platform(
+    platform: crate::security::Platform,
+    probe: &ProbeData,
+) -> Result<(), AppError> {
+    if platform == crate::security::Platform::Facebook
+        && !probe
+            .extractor
+            .as_deref()
+            .is_some_and(|extractor| extractor.eq_ignore_ascii_case("facebook"))
+    {
+        return Err(AppError::Security(
+            "Facebook probe extractor 不符合允許平台".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_drm_marker(value: &serde_json::Value) -> Option<bool> {
@@ -1818,6 +1897,42 @@ mod tests {
     }
 
     #[test]
+    fn facebook_uses_generic_fixed_args_without_hls_or_cookie_options() {
+        let request = request_for(
+            Platform::Facebook,
+            "https://www.facebook.com/100064322940906/videos/pcb.1529534909200593/2093187601588241",
+        );
+        let target = target_for(
+            Platform::Facebook,
+            "https://www.facebook.com/100064322940906/videos/2093187601588241",
+        );
+        let download = build_ytdlp_args(
+            &request,
+            Path::new(r"C:\downloads\.incomplete\12345678-1234-1234-1234-123456789012"),
+            &sidecars(),
+            &target,
+        )
+        .expect("Facebook download args");
+        let probe = build_probe_args(&request, &target).expect("Facebook probe args");
+        for args in [download, probe] {
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("https://www.facebook.com/100064322940906/videos/2093187601588241")
+            );
+            assert!(!args.iter().any(|arg| {
+                arg == "--concurrent-fragments"
+                    || arg == "--add-headers"
+                    || arg == "--cookies"
+                    || arg == "--impersonate"
+                    || arg.contains("fbcdn")
+            }));
+            assert!(args.iter().any(|arg| arg == "--no-plugin-dirs"));
+            assert!(args.iter().any(|arg| arg == "--no-js-runtimes"));
+            assert!(args.iter().any(|arg| arg == "--no-remote-components"));
+        }
+    }
+
+    #[test]
     fn parser_extracts_progress() {
         let update = parse_progress("[download]  42.5% of 10.00MiB at 1.50MiB/s ETA 00:07")
             .expect("progress");
@@ -1856,6 +1971,12 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg.contains("%(formats.:.{has_drm}|[])j")));
+        assert!(args.iter().any(|arg| arg.contains("%(is_live|null)j")));
+        assert!(args.iter().any(|arg| arg.contains("%(live_status|null)j")));
+        assert!(args.iter().any(|arg| arg.contains("%(playlist_id|null)j")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("%(playlist_count|null)j")));
         assert!(!args.contains(&"--dump-single-json".to_string()));
         assert_eq!(
             args.last().map(String::as_str),
@@ -1866,10 +1987,14 @@ mod tests {
 
     #[test]
     fn probe_metadata_is_minimal_and_rejects_drm_login_and_large_fields() {
-        let valid = r#"{"title":"safe","duration":12.5,"extractor":"fixture","webpage_url":"https://www.youtube.com/watch?v=x","availability":"public","has_drm":false}"#;
+        let valid = r#"{"title":"safe","duration":12.5,"extractor":"fixture","webpage_url":"https://www.youtube.com/watch?v=x","availability":"public","has_drm":false,"is_live":false,"live_status":"not_live","playlist_id":null,"playlist_count":null}"#;
         let parsed = parse_probe_metadata(valid).expect("valid metadata");
         assert_eq!(parsed.title.as_deref(), Some("safe"));
         assert_eq!(parsed.duration_seconds, Some(12.5));
+        assert_eq!(parsed.is_live, Some(false));
+        assert_eq!(parsed.live_status.as_deref(), Some("not_live"));
+        assert_eq!(parsed.playlist_id, None);
+        assert_eq!(parsed.playlist_count, None);
         assert!(parse_probe_metadata(
             r#"{"title":"x","availability":"login_required","has_drm":false}"#
         )
@@ -1910,6 +2035,62 @@ mod tests {
             "x".repeat(process::MAX_CAPTURED_OUTPUT)
         );
         assert!(parse_probe_metadata(&oversized).is_err());
+    }
+
+    #[test]
+    fn probe_rejects_live_status_and_playlist_markers() {
+        for metadata in [
+            r#"{"extractor":"fixture","is_live":true}"#,
+            r#"{"extractor":"fixture","live_status":"is_live"}"#,
+            r#"{"extractor":"fixture","live_status":"upcoming"}"#,
+            r#"{"extractor":"fixture","live_status":"is_upcoming"}"#,
+            r#"{"extractor":"fixture","live_status":"post_live"}"#,
+            r#"{"extractor":"fixture","live_status":"was_live"}"#,
+            r#"{"extractor":"fixture","live_status":"unknown"}"#,
+            r#"{"extractor":"fixture","playlist_id":"playlist-id"}"#,
+            r#"{"extractor":"fixture","playlist_count":2}"#,
+        ] {
+            assert!(
+                parse_probe_metadata(metadata).is_err(),
+                "must reject {metadata}"
+            );
+        }
+        for metadata in [
+            r#"{"extractor":"fixture","is_live":null,"live_status":null,"playlist_id":null,"playlist_count":null}"#,
+            r#"{"extractor":"fixture","is_live":false,"live_status":"not_live","playlist_id":null,"playlist_count":1}"#,
+        ] {
+            assert!(
+                parse_probe_metadata(metadata).is_ok(),
+                "must allow {metadata}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_rejects_malformed_live_and_playlist_fields() {
+        assert!(parse_probe_metadata(r#"{"is_live":"false"}"#).is_err());
+        assert!(parse_probe_metadata(r#"{"live_status":false}"#).is_err());
+        assert!(parse_probe_metadata(r#"{"playlist_id":false}"#).is_err());
+        assert!(parse_probe_metadata(r#"{"playlist_count":1.5}"#).is_err());
+        assert!(parse_probe_metadata(r#"{"playlist_count":-1}"#).is_err());
+    }
+
+    #[test]
+    fn facebook_probe_requires_facebook_extractor() {
+        let facebook = parse_probe_metadata(
+            r#"{"extractor":"Facebook","live_status":"not_live","playlist_count":null}"#,
+        )
+        .expect("Facebook metadata");
+        assert!(validate_probe_platform(Platform::Facebook, &facebook).is_ok());
+
+        let wrong = parse_probe_metadata(
+            r#"{"extractor":"youtube","live_status":"not_live","playlist_count":null}"#,
+        )
+        .expect("generic metadata");
+        assert!(validate_probe_platform(Platform::Facebook, &wrong).is_err());
+        assert!(validate_probe_platform(Platform::Youtube, &wrong).is_ok());
+        let missing = parse_probe_metadata(r#"{"live_status":"not_live"}"#).expect("metadata");
+        assert!(validate_probe_platform(Platform::Facebook, &missing).is_err());
     }
 
     #[test]

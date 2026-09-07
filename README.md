@@ -12,11 +12,11 @@
 
 ## 功能範圍
 
-- 保留 YouTube、YouTube Music；小鴨影音只接受 `play.777tv.ai`；歐樂影院只接受 `olevod.com` 與 `www.olevod.com`。2026-09-07 的 YouTube／YouTube Music 公開 URL 不下載 probe 均成功，但完整格式支援仍待將 yt-dlp 的 EJS 與受信任 JavaScript runtime 納入 manifest、來源與版本鎖定。
+- 保留 YouTube、YouTube Music；小鴨影音只接受 `play.777tv.ai`；歐樂影院只接受 `olevod.com` 與 `www.olevod.com`。Facebook（條件式）只接受 `www.facebook.com` 的公開匿名 `/reel/<純數字ID>` 或 `/<頁面純數字ID>/videos/pcb.<貼文純數字ID>/<影片純數字ID>` 形態（亦接受其最小化 canonical page/video ID 形態）；PCB 是 path segment，Facebook 任一 query 一律拒絕，fragment 只會正規化移除，群組／私人／直播／watch／profile 路徑及 fbcdn URL 一律拒絕。Facebook 僅對本報告記載的兩個使用者授權公開 URL 條件式驗證，不宣稱整站或未來可用。2026-09-07 的 YouTube／YouTube Music 公開 URL 不下載 probe 均成功，但完整格式支援仍待將 yt-dlp 的 EJS 與受信任 JavaScript runtime 納入 manifest、來源與版本鎖定。
 - 僅 HTTPS；固定平台/hostname allowlist；啟動下載前再次 DNS 解析並拒絕 IP literal、userinfo、localhost、私有、loopback、link-local、multicast、保留位址。
 - 小鴨影音／歐樂影院 adapter 只解析頁面內固定 JSON，不執行 JavaScript；要求 `encrypt`、`trysee`、`points` 均為數字 0，並驗證 HLS host、所有 URI host、公開 DNS/peer、三層上限、5,000 URI 上限、`#EXTM3U`、VOD `#EXT-X-ENDLIST`，遇到 key 或 live playlist 即拒絕。
 - 每批與全域未完成佇列最多 5 筆，預設最多 3 筆同時工作；支援 audio（MP3）與 video 模式。同一批或既有排隊／執行中的工作若具有相同平台、正規化 URL 與模式會原子拒絕重複；相同平台與 URL 但 audio/video 模式不同則是不同工作。已完成、失敗或取消的歷史工作不阻止使用者重新提交。
-- probe 使用固定 `yt-dlp --ignore-config --no-plugin-dirs --no-js-runtimes --no-remote-components --no-playlist --simulate --skip-download --print` 最小 JSON metadata template，不建立輸出檔；明確 DRM、需登入、受限 availability 或未知非空狀態則拒絕，缺省 optional 欄位不誤判為 DRM。每筆實際下載前都會重新執行相同 probe。
+- probe 使用固定 `yt-dlp --ignore-config --no-plugin-dirs --no-js-runtimes --no-remote-components --no-playlist --simulate --skip-download --print` 最小 JSON metadata template，不建立輸出檔；明確 DRM、需登入、受限 availability、直播／排程／已結束直播 lifecycle、playlist marker 或未知非空狀態則拒絕，缺省 optional 欄位不誤判為 DRM。Facebook 的 probe 另要求 extractor 為 `facebook`。每筆實際下載前都會重新執行相同 probe。
 - 下載使用固定、已驗證的 resources sidecar 路徑，不接受任意 CLI 參數或輸出路徑；固定停用未驗證 plugin、JavaScript runtime 與 remote component。兩個直接 HLS 平台固定 `--concurrent-fragments 4`，全域最多 3 筆工作；使用 `.incomplete/<UUID>` 暫存，成功後才移入本批 Rust 驗證後的輸出根。
 - 輸出目錄由 Rust 持有；前端 IPC payload 不含路徑。預設根為 `Downloads\Windows Media Downloader`，自訂根只保存於 app-local schema-versioned JSON，寫入前後會檢查一般檔案、大小、reparse point 與原子替換。選取及每批啟動前會拒絕 UNC、mapped drive、磁碟根、不可寫、Windows／Program Files／ProgramData、程式及 resources 目錄與其子目錄；自訂目錄消失時不會偷偷重建，工作實際開始前會再次驗證。這些檢查無法消除同一權限程序的極短 TOCTOU，詳見 `SECURITY.md`。
 - 單筆/全部取消會以 Windows `taskkill.exe /PID /T /F`（絕對路徑、非 shell）終止程序樹，再回收 child handle。
